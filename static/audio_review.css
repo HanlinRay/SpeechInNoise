@@ -198,3 +198,15 @@ body #exit-session-btn {
   bottom: 10px;
   right: 10px;
 }
+
+/* Same order and font as the test pages: the words, then All / None, then
+   "Faulty Audio Recording" (it used to sit above the words, in the browser's
+   default serif font). Next Audio stays inside the form on this page: there
+   "form:invalid #next-audio" keeps it disabled until every word is scored. */
+body #unclear-checkbox-label {
+  order: 2;
+  font-family: var(--compact);
+}
+.next-audio-note {
+  font-family: var(--compact);
+}
