@@ -72,6 +72,16 @@ separate branch that becomes one pull request to the lab:
 
 ## Running it
 
+To click through the site on your own computer (local database, a quiet tone in
+place of the audio files, which are not in git):
+
+```bash
+pip install Flask absl-py numpy pandas scipy matplotlib seaborn jieba
+python3 capstone/run_local.py      # then open http://localhost:8000/jnd/index.html
+```
+
+Tests:
+
 ```bash
 pip install -r requirements.txt          # jieba is the only new package
 pytest --ignore=asr_test.py --ignore=offline_asr_test.py \
