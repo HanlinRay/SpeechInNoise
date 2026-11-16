@@ -46,18 +46,18 @@
 
       <form id="interactive" action="javascript:void(0)" onsubmit="return false">
         <!-- audio contro;ls -->
-        <div id="main-content-wrapper" style="display: flex; flex-direction: column; gap: 20px; align-items: center;">
-          <div id="audio-controls" style="flex: 1;">
+        <div id="main-content-wrapper">
+          <div id="audio-controls">
           <div class="center-wrapper active" id="playback-wrapper">
             <div class="playback-container">
               <div id="audio-description" class="offset-description">Play Audio</div>
               <button id="playback" class="playback-interface pause" type="button"></button>
               <canvas id="waveform-canvas" width="300" height="60"></canvas>
-              <button id="next-audio" class="base-button" type="button" style="margin-top: 15px;">
+              <button id="next-audio" class="base-button" type="button">
                 <span>Next Audio</span>
                 <span class="material-symbols-outlined">arrow_right_alt</span>
               </button>
-              <div style="text-align: center; font-size: 0.4em; color: var(--page-text-color, #666); margin-top: 8px; opacity: 0.8;">
+              <div class="next-audio-note">
                 The next audio will play upon loading.
               </div>
             </div>
@@ -76,24 +76,24 @@
               None
             </button>
           </div>
-          <label id="unclear-checkbox-label" style="display: flex; align-items: center; cursor: pointer; color: var(--page-text-color);">
-            <input type="checkbox" id="unclear-checkbox" style="margin-right: 8px; cursor: pointer;" />
+          <label id="unclear-checkbox-label">
+            <input type="checkbox" id="unclear-checkbox" />
             <span>Faulty Audio Recording</span>
           </label>
         </div>
       </form>
-      <div id="next-wrapper" style="display: block;">
+      <div id="next-wrapper">
         <div class="next-outer-spacer"></div>
         <button id="overlay-results" class="base-button hidden" type="button">
           Results
         </button>
         <div class="next-outer-spacer"></div>
       </div>
-      <div id="footer" style="padding: 10px; min-height: 60px; position: relative;">
+      <div id="footer">
         <div id="exceptions-view"></div>
         <div id="playback-debug"></div>
         <!-- Exit Session Button (bottom right) -->
-        <button id="exit-session-btn" class="base-button" type="button" style="position: absolute; bottom: 10px; right: 10px;">
+        <button id="exit-session-btn" class="base-button" type="button">
           Exit Session
         </button>
         <!-- Review Session Information -->
