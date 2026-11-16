@@ -39,28 +39,31 @@ attach to the word before it (很棒的, 加班了). **L1/L2**: native / second 
 (`segment_mandarin.py`, boundary F1 0.935 against hand-split AzBio Mandarin); the
 "Default" list fix for Spanish and Mandarin (`api.py`).
 
-**M2. Re-split MSPSEN and BKB-SIN.** Get both transcript CSVs from the lab. Run the
+**M2. Re-split MSPSEN and BKB-SIN (in progress).** Both lists are in hand (from the
+lab, not in git) and split: 232 sentences, 203 change. Review: Yunqi (native
+Mandarin speaker), MSPSEN by 23 November, BKB-SIN by 27 November. Run the
 splitter with `--review`; a native speaker checks every changed sentence and records
 fixes in an overrides CSV; re-run until the review is clean. Add them as new
 projects in `projects.py` and `api.py`, the way AzBio Mandarin is added. Check:
 the same sentence gives the same words in both lists; no characters are lost
 (the splitter refuses that already).
 
-**M3. Measure the recognizer on Mandarin.** For each Mandarin trial with both a
+**M3. Measure the recognizer on Mandarin (only if the lab exports the recognizer's
+Mandarin output by 23 November; otherwise cut).** For each Mandarin trial with both a
 person's score and a recognizer transcript, compare word by word. Output a CSV (one
 row per trial: answer, recognizer text, person's marks, recognizer's marks) and the
 agreement per subject and SNR. Check whether recognizer errors come from splitting
 (the recognizer's words cut differently from the answer's) rather than hearing:
 score both on characters and on scoring words.
 
-**M4. Support the L1/L2 comparison.** For each subject, the score per test and SNR in
+**M4. Support the L1/L2 comparison (cut: no subject tested yet; do not start).** For each subject, the score per test and SNR in
 one CSV, with language group (L1 Chinese / L1 English) as a column, so the two groups
 can be compared directly.
 
 # 4 Top risks
 
-1. The MSPSEN and BKB-SIN lists are not in GitHub. Fallback: keep developing on AzBio
-   Mandarin, which has the same format.
+1. The native-speaker review is the critical path. Fallback: the draft claims MSPSEN
+   (checked) and shows BKB-SIN as proposed only.
 2. The word convention is a lab decision. The splitter makes it a setting
    (`--attach`), not a hard-coded rule.
 3. The recognizer's output may not be reachable from outside the server. Fallback: an

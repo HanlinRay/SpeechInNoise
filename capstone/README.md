@@ -24,7 +24,8 @@ listeners on equal terms.
   the hand split is not consistent with itself (很高兴 is one word, but 不 规则的 is
   two), and the program makes real mistakes (期限得 加班了, where 得 means "must" and
   is not a particle; 这 周 轮 到 instead of 这周 轮到). So the tool proposes and a
-  native speaker confirms, through a review CSV. 13 tests.
+  native speaker confirms, through a review CSV, sorted with the rows to check
+  first. 15 tests.
 - Found and fixed a bug: choosing "Default" on the start page gave a 400 error on
   the Spanish and Mandarin tests (wrong language code). 5 tests.
 - The test pages show where the listener is and how far scoring has got: under
@@ -33,8 +34,22 @@ listeners on equal terms.
   comes from a new `levels` field in the `/start` response; nothing new is
   stored. 14 browser tests and 6 API tests (`scoring_status_test.py`,
   `audio_levels_test.py`).
-- Not done yet: the MSPSEN and BKB-SIN lists are not in the GitHub repository (only
-  AzBio Mandarin is), so they cannot be re-split until we get them from the server.
+- Existing transcripts cannot change: `transcripts_frozen_test.py` (12 tests) checks
+  every `metadata/*_transcript.csv` against `metadata/transcripts.sha256`.
+- Start page: choose the language first (English, Spanish, Chinese), then the test.
+  Results page: one collapsed row per session (name, number of trials, time), newest
+  first; a click opens the trials and only then loads their audio. Rater page: no
+  inline styles left, and "Faulty Audio Recording" sits below All / None. 10 browser
+  tests (`ui_layout_test.py`).
+- M2 in progress: I have the lab's MSPSEN and BKB-SIN lists and split them (232
+  sentences, 203 change). They are the lab's data and are not in the repository; the
+  native-speaker review (me, a native Mandarin speaker) has not started (0 of 232).
+- Cut: M4. M3 only if the lab exports the recognizer's Mandarin output by
+  23 November (see [docs/check-in.md](../docs/check-in.md)).
+- Tests: `pytest --ignore=asr_test.py --ignore=offline_asr_test.py
+  --ignore=offline_asr_whisper_test.py`; on GitHub the same run is
+  `.github/workflows/capstone-tests.yml`, which installs jieba and Playwright and
+  fails if any test is skipped.
 
 EE292M capstone. The plan for the agent is in [PROMPT.md](PROMPT.md); this file is
 for reviewers. Where it stands against the plan: [docs/check-in.md](../docs/check-in.md).
@@ -52,6 +67,7 @@ separate branch that becomes one pull request to the lab:
 | `mandarin-word-segmentation` | `segment_mandarin.py`, `segment_mandarin_test.py`, `jieba` in requirements |
 | `mandarin-default-language` | `api.py` (`PROJECT_LANGUAGES`), `api_language_test.py` |
 | `scoring-progress` | `static/scoring_status.js`, `levels` in `/start` (`audio.py`), a few lines of `audio.css`, one `<script>` line per page, `scoring_status_test.py`, `audio_levels_test.py` |
+| `scoring-ui-layout` | start page language filter, collapsed results page, rater page styles (`static/` only), `ui_layout_test.py` |
 | `capstone` | all of the above merged, plus this folder |
 
 ## Running it
@@ -63,7 +79,7 @@ pytest --ignore=asr_test.py --ignore=offline_asr_test.py \
 
 # Keyboard tests run in a real browser; they skip themselves without Playwright.
 pip install playwright && playwright install chromium
-pytest scoring_keys_test.py scoring_status_test.py
+pytest scoring_keys_test.py scoring_status_test.py ui_layout_test.py
 
 # How close is automatic splitting to the hand-split AzBio lists?
 python3 segment_mandarin.py --input metadata/azbio_mandarin_transcript.csv --evaluate
@@ -134,10 +150,29 @@ open `azbio_mandarin.html`, and in the browser console run
 | R2: keep the native speaker's fixes in git, with who and when | Built: `metadata/mandarin_overrides.csv` (header only until the review starts); a test reads it. |
 | R2: one settings file for the word convention | Partly: `--attach` stays a flag until the lab agrees on the convention; then the particle list moves into the overrides file and the flag only reads it. |
 
+## Review findings (8a) and what I did
+
+| Finding | Done, or answer and reason |
+| --- | --- |
+| R1: PROMPT.md still lists M3 and M4 as plain milestones | Built: M4 marked cut, M3 "only if export by 23 Nov". |
+| R1: README "Current state" and Top risk 1 out of date; test counts drifted (13 vs 15) | Built: both rewritten; counts checked against a full run. |
+| R1: write down who does the native-speaker review, and by when | Built: me (native Mandarin speaker), MSPSEN by 23 Nov, BKB-SIN by 27 Nov, in PROMPT.md M2. |
+| R1, R2: no `CLAUDE.md` | Built: `CLAUDE.md` with only what the code does not show: the test command and its installs, what never to do, which data is the original, `git add -f` for CSVs, never edit `transcripts.sha256` unless asked. |
+| R1, R2: no skill ran; write one | Built `.claude/skills/before-pull-request/SKILL.md` (R2's choice: it repeats for every pull request, and the counts drifted this week). R1's re-split skill waits until M2 has been done once by hand. |
+| R1: the browser tests skip on GitHub, so CI is green without them | Built: `.github/workflows/capstone-tests.yml` on the fork's branches, installs jieba and Playwright, fails if anything is skipped. The lab's `python-app.yml` is unchanged. |
+| R2: what does the draft claim if the review is half done | Built: Top risk 1. |
+| R2: a new transcript can pass locally and be missing on GitHub (`*.csv` is ignored) | Built: the line in `CLAUDE.md`; CI now runs on a fresh clone, so a missing file fails there. |
+| R2: a list and its checksum can change in the same commit | Not now: only a person reading the diff catches it; a pre-commit check is left for later, as agreed. |
+| R2: `nightly.sh` copies the database with `cp` while the server writes; no restore tested | Answer: the lab's server, not this project; I will raise it with Malcolm. |
+| R2: the MSPSEN / BKB-SIN splits and the review CSV have one copy, on my laptop | Accepted: I will ask Emily for a folder on the lab drive; they move there before the review starts. Not in git, because they are the lab's unpublished lists. |
+
 ## Top risks
 
-1. **The MSPSEN and BKB-SIN lists live only on the server**, not in GitHub. Asked the
-   lab where they are; until then the splitter is tested on AzBio Mandarin.
+1. **The native-speaker review of 232 MSPSEN / BKB-SIN sentences is the critical
+   path**, and has not started. If only part is done by 30 November, the draft claims
+   it for MSPSEN (checked) and shows BKB-SIN as proposed only. The lists and the
+   review CSV are on my laptop only, outside any repository, until the lab gives me a
+   folder on its drive (I will ask Emily).
 2. **What counts as one word is a lab decision**, not a program's. The splitter
    follows the AzBio convention (particles such as 的/了/吧 stay with the word before
    them); the lab has to agree before any list is changed, and a native speaker
