@@ -37,7 +37,7 @@ listeners on equal terms.
   AzBio Mandarin is), so they cannot be re-split until we get them from the server.
 
 EE292M capstone. The plan for the agent is in [PROMPT.md](PROMPT.md); this file is
-for reviewers.
+for reviewers. Where it stands against the plan: [docs/check-in.md](../docs/check-in.md).
 
 ## Where things are
 
@@ -76,6 +76,63 @@ python3 segment_mandarin.py --input mspsen_transcript.csv \
 To try the shortcuts by hand without the server: `python3 -m http.server -d static`,
 open `azbio_mandarin.html`, and in the browser console run
 `audio.options("我 知道 一家 很棒的 小店")`.
+
+## The system: where each part runs
+
+```text
+ Google Drive "Web_Audio" ──copy──► static/audio/*.wav  (not in git)
+                                          │
+ Browser (subject, rater) ◄───────────────┤   test pages + scoring_keys.js
+   one <script> line per page             │   + scoring_status.js
+                                          │
+ Lab server /var/www/jnd ─────────────────┘
+   Flask under uwsgi (nohup sh server.sh), api.py, audio.py
+   experiments.db (SQLite): users, trials, replies, scores
+   nightly.sh: offline_asr.py, then a dated copy of experiments.db to the lab drive
+
+ Anyone's laptop (never touches the server)
+   segment_mandarin.py ─► review CSV ─► native speaker ─► metadata/mandarin_overrides.csv
+                      └─► new transcript CSV ─► metadata/ + projects.py (a NEW project)
+```
+
+- **In the browser:** `scoring_keys.js`, `scoring_status.js`. They reach users only
+  when the lab deploys `static/`.
+- **On the server, in every request:** the "Default" language fix (`api.py`) and the
+  `levels` field of `/start` (`audio.py`).
+- **Offline:** `segment_mandarin.py`. Its output goes live only as a new transcript
+  and a new project.
+- **How code gets to the server:** through pull requests to the lab's `main`; the lab
+  (Malcolm) pulls and restarts the server. Nothing in this fork runs on the live
+  site until a pull request is merged (open: #18).
+
+## What cannot be rebuilt
+
+- **The subjects' recordings and every score in `experiments.db`.** They belong to
+  the lab; the only copy is the nightly database file on the lab drive. Nothing in
+  this project writes to them, and no existing list may change under them:
+  `transcripts_frozen_test.py` fails if any `metadata/*_transcript.csv` differs from
+  `metadata/transcripts.sha256`.
+- **Decisions people make:** which particles join the word before them (today
+  `--attach`, default `DEFAULT_ATTACH`), the native speaker's fixes, and the
+  hand-split AzBio Mandarin lists used as a reference. The fixes go in git, in
+  `metadata/mandarin_overrides.csv` (`sentence,words,checked_by,date`), so GitHub is
+  the backup and every change has a history.
+- Everything else (code, splits, review CSVs) is rebuilt from git with one command.
+
+## Review findings (7a) and what I did
+
+| Finding | Done, or answer and reason |
+| --- | --- |
+| R1: the splitter takes 0.38 s; the time goes to people | Agreed. Timing one session by mouse and by keys needs a rater and real audio; I will do it with the first subjects (M2), not now. |
+| R1: no drawing of the system | Built: "The system" above. |
+| R1: how code reaches the server is not written down | Built: last line of "The system". |
+| R1: the audio comes from Google Drive, not git | Built: in the drawing. |
+| R1: the database and recordings cannot be rebuilt | Built: "What cannot be rebuilt". |
+| R1: a boundary: re-split lists only as new projects | Built: `transcripts_frozen_test.py` + `metadata/transcripts.sha256` (12 tests; a changed or new transcript fails). |
+| R2: sort the review CSV, checks first | Built: `write_review` puts `check` rows first, then changed, then unchanged; nothing is dropped. Test added. |
+| R2: say where each part runs | Built: the list under the drawing. |
+| R2: keep the native speaker's fixes in git, with who and when | Built: `metadata/mandarin_overrides.csv` (header only until the review starts); a test reads it. |
+| R2: one settings file for the word convention | Partly: `--attach` stays a flag until the lab agrees on the convention; then the particle list moves into the overrides file and the flag only reads it. |
 
 ## Top risks
 

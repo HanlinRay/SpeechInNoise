@@ -167,12 +167,20 @@ def write_trials(path: str, trials: Sequence[Trial], changes: Sequence[Change]):
                     + t.ending)
 
 
+def review_order(change: Change) -> Tuple[int, int]:
+    """Rows a person must look at first: "check" rows, then changed rows,
+    then unchanged rows (kept, so nothing is hidden), each in file order."""
+    rank = (0 if "check" in change.status
+            else 2 if change.status == "unchanged" else 1)
+    return rank, change.line_number
+
+
 def write_review(path: str, changes: Sequence[Change]):
     with open(path, "w", encoding="utf-8", newline="") as f:
         out = csv.writer(f)
         out.writerow(["line", "status", "old_answer", "new_answer",
                       "old_words", "new_words"])
-        for c in changes:
+        for c in sorted(changes, key=review_order):
             out.writerow([c.line_number, c.status, c.old, c.new,
                           len(c.old.split()), len(c.new.split())])
 

@@ -114,3 +114,25 @@ def test_matches_the_hand_split_azbio_lists(segmenter, name):
     pairs = [(t.answer.split(), segmenter.words(t.answer))
              for t in trials if t.answer]
     assert sm.agreement(pairs)["f1"] >= 0.9
+
+
+def test_review_puts_rows_to_check_first(tmp_path):
+    path = tmp_path / "review.csv"
+    sm.write_review(str(path), [
+        sm.Change(1, "我 知道", "我 知道", "unchanged"),
+        sm.Change(2, "火车站有车", "火车站 有车", "changed"),
+        sm.Change(3, "一/二", "一/二", "check: has alternatives, left as is"),
+        sm.Change(4, "很棒的小店", "很棒的 小店", "changed; check: long word"),
+    ])
+    lines = [row.split(",")[0]
+             for row in path.read_text(encoding="utf-8").splitlines()[1:]]
+    assert lines == ["3", "4", "2", "1"]  # nothing dropped, checks first
+
+
+def test_committed_overrides_file_is_read():
+    """metadata/mandarin_overrides.csv is where a native speaker's fixes are
+    kept; extra columns (who checked, when) must not break reading it."""
+    overrides = sm.read_overrides(relpath("metadata", "mandarin_overrides.csv"))
+    assert all(isinstance(v, str) for v in overrides.values())
+    segmenter = sm.Segmenter(overrides={"这周轮到我": "这周 轮到 我"})
+    assert segmenter.words("这 周 轮 到 我") == ["这周", "轮到", "我"]
