@@ -1,5 +1,18 @@
 ## Useful commands
 
+### Database completeness
+
+```bash
+python3 database_completeness.py experiments_emily.db
+```
+
+Prints one line with counts and percentages of all recorded utterances
+(`audio_results`) having at least one nonempty ASR result and having a nonempty
+annotation from every rater in `metadata/professional_raters.txt`. These are
+independent fractions; duplicate ASR or annotation rows do not inflate counts.
+This checks stored-data presence, not JSON validity or recognition accuracy.
+The database is opened read-only; an empty database reports `N/A` percentages.
+
 ### Summarize rater scores
 
 `summarize_raters.py` reads `audio_results`, `audio_trials`, `audio_asr`,
@@ -38,17 +51,66 @@ After `offline_asr.py` has populated `audio_asr`, run:
 python3 summarize_asr.py --dbfile experiments_emily.db
 ```
 
+By default, every summary, plot, and report (including pre-scoring coverage
+counts) is restricted to the explicit study-user allowlist:
+
+```bash
+python3 summarize_asr.py --dbfile experiments_large_prompt.db \
+  --valid_users_file=metadata/valid_users.txt
+```
+
+`metadata/valid_users.txt` lists the 29 usernames from
+`experiments_large_prompt.db` fully matching `A\d+[SP]\d+`, excluding `A2P2`,
+`A2S28`, and `A6S30`. Update this explicit list when eligible users change.
+The file accepts one exact, case-sensitive username per line, ignoring blank
+lines and `#` comments. Missing or empty files are errors. Set
+`--valid_users_file=` to disable username filtering.
+
 The program keeps only the recognized word list from ASR JSON, scores it
 against each trial's answer and `homonym_list.csv`, and includes in-booth
 annotations plus only raters listed in `metadata/professional_raters.txt`.
+Before scoring, it prints selected result counts and annotation coverage,
+including ASR-backed utterances missing any valid, nonempty professional-rater
+annotation from that configured list.
 It writes per-utterance, project/SNR, subject/project/SNR, and subject SRT CSVs,
-plus a three-panel recognition comparison PNG. Default output filenames use
+plus a three-panel recognition comparison PNG and a disagreement page named
+`recognition_{test_name}_discrepancies.html`. The page lists utterances where
+in-booth, ASR, or a professional rater's fraction-correct score differs, and
+includes the recognized ASR words. Default output filenames use
 `recognition_{test_name}_...`; `test_name` comes from `--project`, a sole project
 found in the data, or `all` when multiple projects are included. Explicit output
-paths remain unchanged. The subject SRT CSV includes
+relative paths are placed under `--output_dir` (default `.`), while absolute
+paths starting with `/` remain unchanged. Output directories are created as
+needed. For example, `--output_dir=results/large` keeps that model's CSVs,
+plots, text report, and HTML together. Input paths are unaffected.
+The subject SRT CSV includes
 each professional rater's fitted SRT, their mean SRT (the reference), and
 their standard deviation. It also writes an SRT comparison PNG with rater-SRT
-standard-deviation error bars and a CSV of Bland-Altman bias/limits of agreement
+standard-deviation error bars and `recognition_{test_name}_srt_histogram.png`,
+with in-booth and ASR SRT differences from the professional-rater mean in
+separate panels and one row per project. Each bar lists subject usernames
+(falling back to numeric subject IDs). The shaded range is centered on each
+panel's mean paired difference and extends one pooled within-subject
+professional-rater SD in either direction. For each test, the SD pools
+professional-rater deviations from each subject's professional mean, using
+`sqrt(sum((n_i - 1) * s_i**2) / sum(n_i - 1))`, where `n_i` and `s_i`
+are the number of valid professional SRTs and their sample SD for subject `i`.
+Subjects with fewer than two valid professional fits do not contribute to
+this SD; all eligible subjects in the test contribute, even if they lack an
+ASR or in-booth SRT. The same pooled SD is used in both panels. It measures
+professional-rater variability, not the spread of ASR or in-booth differences
+or the uncertainty of an individual fit.
+
+The plot and console output call subjects strictly outside the shaded range
+outliers and report their count and a Gaussian benchmark of approximately
+31.7% of paired subjects. This benchmark assumes the comparison differences
+are normally distributed with SD equal to the pooled professional-rater SD;
+it is not necessarily the expected outlier count for the actual comparison
+distribution. The range is omitted when the pooled SD cannot be estimated,
+and the Gaussian benchmark is not applicable when the SD is zero.
+The console counts are also printed with `--no_plot`. Set `--histogram_bins` to
+change the default of 10.
+It also writes a CSV of Bland-Altman bias/limits of agreement
 and ICC(3,1) for in-booth and ASR SRTs versus the professional-rater mean, plus
 `recognition_srt_agreement.txt` explaining the statistics and nominal p-value
 significance. Bias uses a paired t-test; ICC(3,1) uses its F-test against zero.
@@ -60,7 +122,7 @@ configurable with `--noninferiority_margin_db`. Results are saved to
 `recognition_srt_noninferiority.csv`.
 Use `--project=quick` or `--language=en` to filter the source rows; output paths
 can be changed with `--output_csv`, `--snr_summary_csv`, `--subject_snr_csv`,
-`--srt_csv`, `--scatter_plot`, `--srt_scatter_plot`, `--agreement_csv`, and
+`--srt_csv`, `--scatter_plot`, `--srt_scatter_plot`, `--srt_histogram_plot`, `--agreement_csv`, and
 `--noninferiority_csv`.
 
 ### Split Mandarin answers into scoring words
@@ -79,6 +141,57 @@ python3 segment_mandarin.py --input metadata/azbio_mandarin_transcript.csv --eva
 python3 segment_mandarin.py --input new_list.csv --output new_list_split.csv \
     --review new_list_review.csv
 ```
+
+### Compare ASR model variations
+
+Run `summarize_asr.py` separately for each model, saving its subject-SRT CSVs
+in separate directories. Then reproduce the two "Model Comparison" plots from
+[the Colab notebook](https://colab.research.google.com/drive/1fsi7D-HB9xuC5BBegQQ6kVHhwdgM9xh2):
+
+```bash
+python3 compare_asr_models.py \
+  --model tiny.en results/tiny.en/recognition_quick_srts.csv results/tiny.en/recognition_win_srts.csv \
+  --model large results/large/recognition_all_srts.csv \
+  --model large_prompt results/large_prompt/recognition_all_srts.csv \
+  --output_dir model_comparison
+```
+
+Each `--model` takes a label and one or more subject-SRT CSVs.
+A combined `recognition_all_srts.csv` or separate QuickSIN/WIN CSVs
+work equally well. Do not supply overlapping subject/project rows for a
+model. Only projects `quick` and `win` are plotted.
+
+Use `--model_order="tiny.en,large,,large_prompt"` to override the plot order.
+List every input model exactly once. Empty comma-delimited slots break the
+lines between model groups in both plots without consuming x-axis positions;
+consecutive models always remain one position apart. Whitespace
+around names is ignored; unknown, omitted, or repeated model names are errors.
+Markers keep isolated model results visible. The default order is:
+
+```text
+tiny.en,tiny,base.en,base,small.en,small,medium.en,medium,large,,large_prime,large_prompt,,large_forced_-10,large_forced_0,large_forced_10,large_forced_20,large_forced_100,,large_exact_-10,large_exact_0,large_exact_10,large_exact_20,large_exact_100
+```
+
+The default skips model names without input CSVs, preserving the group
+separators. Input models not in the default require an explicit order.
+Set `--model_order=` to use the `--model` input order instead.
+The summary CSV remains in input order, without separator rows.
+
+The outputs are `model_comparison_outliers.png`,
+`model_comparison_stds.png`, and `model_comparison_summary.csv`. Both plots
+have Quick/WIN Audiologist (in-booth) and ASR lines. Differences are each
+subject's in-booth or ASR SRT minus `professional_srt` (the professional-rater
+**mean** supplied by `summarize_asr.py`, not a recomputed median).
+
+Outliers have absolute difference **strictly greater than 2 dB**, configurable
+with `--outlier_threshold`. This is measured from zero, not from the mean
+difference. The second plot uses the sample SD (`ddof=1`) of those differences,
+not the pooled within-subject rater SD used in `summarize_asr.py`'s histogram.
+Missing/nonfinite pairs are excluded independently for each model, project,
+and comparison, with warnings; fewer than two pairs leave an SD gap, and zero
+pairs also leave an outlier-count gap. The summary CSV records the paired
+sample counts (`n`). Models are not restricted to a shared subject cohort:
+use matching upstream inputs for fair comparisons and inspect the sample counts.
 
 Deploy server and detach process from the appropriate folder path.
 ```bash

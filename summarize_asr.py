@@ -3,7 +3,7 @@
 Reads ASR JSON produced by ``offline_asr.py`` and joins it with the trial
 answers, in-booth annotations, and professional review annotations. Writes a
 per-utterance CSV, project/SNR and subject/SNR summaries, subject SRT fits,
-and a three-panel comparison plot.
+comparison plots, agreement reports, and per-utterance discrepancy HTML.
 """
 
 import json
@@ -64,13 +64,33 @@ SCORE_COLUMNS = [
 
 
 def normalize_word(word: str) -> str:
-    """Normalize a keyword while preserving Unicode letters and compounds."""
+    """Normalize a keyword while preserving Unicode letters and hyphens.
+
+    Args:
+        word: Keyword to normalize.
+
+    Returns:
+        NFKC-normalized, case-folded word without underscores or punctuation
+        other than hyphens.
+    """
     word = unicodedata.normalize("NFKC", word).casefold()
     return re.sub(r"[^\w-]", "", word, flags=re.UNICODE).replace("_", "")
 
 
 def read_homonyms(path: str) -> Dict[str, Set[str]]:
-    """Read comma-separated homonym groups into a bidirectional mapping."""
+    """Read comma-separated homonym groups into a bidirectional mapping.
+
+    Args:
+        path: UTF-8 file containing one comma-separated group per line.
+            Text after ``#`` is ignored.
+
+    Returns:
+        Mapping from each normalized word to the other words in its groups.
+        Returns an empty mapping with a warning if the file is missing.
+
+    Raises:
+        OSError: If the file cannot be read for a reason other than absence.
+    """
     homonyms: Dict[str, Set[str]] = {}
     try:
         with open(path, "r", encoding="utf-8") as file:
@@ -86,7 +106,17 @@ def read_homonyms(path: str) -> Dict[str, Set[str]]:
 
 
 def read_professional_raters(path: str) -> Set[str]:
-    """Read reviewer usernames, ignoring blank lines and comments."""
+    """Read reviewer usernames, ignoring blank lines and comments.
+
+    Args:
+        path: UTF-8 file containing one reviewer username per line.
+
+    Returns:
+        Set of case-folded usernames, excluding comments and blank lines.
+
+    Raises:
+        OSError: If the file cannot be read.
+    """
     raters: Set[str] = set()
     with open(path, "r", encoding="utf-8") as file:
         for line in file:
@@ -97,7 +127,15 @@ def read_professional_raters(path: str) -> Set[str]:
 
 
 def parse_truth_values(value: Any) -> Optional[List[bool]]:
-    """Parse JSON or legacy comma-separated boolean annotation data."""
+    """Parse JSON or legacy comma-separated boolean annotation data.
+
+    Args:
+        value: Annotation list, JSON string, or legacy comma-separated string.
+
+    Returns:
+        List of booleans, or None if the value is missing, is not a list, or
+        contains an unrecognized entry. An empty list remains empty.
+    """
     if value is None or value == "":
         return None
     try:
@@ -119,8 +157,40 @@ def parse_truth_values(value: Any) -> Optional[List[bool]]:
     return result
 
 
+def read_valid_users(path: str) -> Set[str]:
+    """Read an exact-case subject allowlist, ignoring comments and blank lines."""
+    with open(path, "r", encoding="utf-8") as file:
+        usernames = {
+            username
+            for line in file
+            if (username := line.split("#", 1)[0].strip())
+        }
+    if not usernames:
+        raise ValueError(f"Valid-user file {path} contains no usernames.")
+    return usernames
+
+
+def _valid_user_filter(valid_users: Optional[Set[str]]) -> Tuple[str, Tuple[str, ...]]:
+    """Build a parameterized subject filter shared by counts and scoring."""
+    if valid_users is None:
+        return "", ()
+    if not valid_users:
+        return "AND 0", ()
+    usernames = tuple(sorted(valid_users))
+    placeholders = ", ".join("?" for _ in usernames)
+    return (
+        f"AND ar.subject IN (SELECT id FROM users WHERE username IN ({placeholders}))",
+        usernames,
+    )
+
+
 @lru_cache(maxsize=1)
 def _english_normalizer():
+    """Create the cached Whisper English normalizer if it is installed.
+
+    Returns:
+        An EnglishTextNormalizer instance, or None if Whisper is unavailable.
+    """
     try:
         from whisper.normalizers import EnglishTextNormalizer
 
@@ -134,6 +204,14 @@ def normalize_recognition_text(text: str, language: str) -> List[str]:
 
     Non-English test data uses Unicode-aware tokenization without applying an
     English-only normalizer. This keeps accents and non-Latin scripts intact.
+
+    Args:
+        text: Recognized or reference text to tokenize.
+        language: Language code; codes beginning with ``en`` use Whisper's
+            English normalizer when available.
+
+    Returns:
+        List of normalized, nonempty word tokens.
     """
     text = text or ""
     if (language or "").casefold().startswith("en"):
@@ -144,7 +222,16 @@ def normalize_recognition_text(text: str, language: str) -> List[str]:
 
 
 def extract_asr_words(asr_data: Any, language: str) -> List[str]:
-    """Extract only recognized words from offline_asr's JSON result."""
+    """Extract only recognized words from offline_asr's JSON result.
+
+    Args:
+        asr_data: Parsed ASR result or JSON-encoded result.
+        language: Language code used for text normalization.
+
+    Returns:
+        Normalized tokens from segment words, or from the result's text when
+        segment words are unavailable. Invalid JSON or non-dict data gives [].
+    """
     if isinstance(asr_data, str):
         try:
             asr_data = json.loads(asr_data)
@@ -168,6 +255,13 @@ def answer_slots(answer: str, project: str) -> List[str]:
     CNC and WIN trials are single-keyword tests; other projects encode one
     keyword slot per whitespace-delimited answer item. Slash alternatives
     remain within a slot and are expanded during matching.
+
+    Args:
+        answer: Ground-truth answer string.
+        project: Test name, used to identify CNC and WIN.
+
+    Returns:
+        Keyword slots in their original order.
     """
     answer = answer or ""
     if project.casefold() in {"cnc", "win"}:
@@ -178,6 +272,16 @@ def answer_slots(answer: str, project: str) -> List[str]:
 def _candidate_phrases(
     slot: str, language: str, homonyms: Dict[str, Set[str]]
 ) -> Set[Tuple[str, ...]]:
+    """Expand a keyword slot into normalized alternative word sequences.
+
+    Args:
+        slot: Keyword slot, potentially containing slash-separated alternatives.
+        language: Language code used for text normalization.
+        homonyms: Mapping from normalized words to accepted alternatives.
+
+    Returns:
+        Set of candidate word tuples, including homonym expansions.
+    """
     candidates: Set[Tuple[str, ...]] = set()
     for option in slot.split("/"):
         words = normalize_recognition_text(option, language)
@@ -199,7 +303,18 @@ def score_asr_words(
     asr_words: Sequence[str],
     homonyms: Dict[str, Set[str]],
 ) -> List[bool]:
-    """Return one ASR hit/miss value per ground-truth keyword slot."""
+    """Score recognized words against the ground-truth keyword slots.
+
+    Args:
+        answer: Ground-truth answer string.
+        project: Test name determining how the answer is split into slots.
+        language: Language code used to normalize answer alternatives.
+        asr_words: Recognized words to match.
+        homonyms: Mapping from normalized words to accepted alternatives.
+
+    Returns:
+        One boolean hit/miss value for each ground-truth slot.
+    """
     slots = answer_slots(answer, project)
     recognized = {normalize_word(word) for word in asr_words}
     matches = []
@@ -220,6 +335,14 @@ def score_asr_words(
 
 
 def fraction_correct(values: Optional[Sequence[bool]]) -> float:
+    """Calculate the fraction of true annotation values.
+
+    Args:
+        values: Sequence of hit/miss values, or None.
+
+    Returns:
+        Fraction of truthy values, or NaN for a missing or empty sequence.
+    """
     if not values:
         return float("nan")
     return sum(bool(value) for value in values) / len(values)
@@ -231,9 +354,27 @@ def fetch_detail_records(
     homonyms: Dict[str, Set[str]],
     project: str = "",
     language: str = "",
+    valid_users: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Load result rows and assemble one scored record per in-booth trial."""
-    query = """
+    """Load result rows and assemble one scored record per in-booth trial.
+
+    Args:
+        dbfile: Path to the SQLite experiment database.
+        professional_raters: Case-folded reviewer usernames to include.
+        homonyms: Mapping from normalized words to accepted alternatives.
+        project: Project filter; an empty string includes all projects.
+        language: Language filter; an empty string includes all languages.
+        valid_users: Exact subject usernames to include; None includes all.
+
+    Returns:
+        Scored records for ASR-backed trials, including in-booth scores,
+        recognized words, and individual and mean professional scores.
+
+    Raises:
+        sqlite3.Error: If the database cannot be queried.
+    """
+    subject_filter, subject_parameters = _valid_user_filter(valid_users)
+    query = f"""
         SELECT
             ar.id AS in_booth_id,
             ar.subject AS subject_id,
@@ -259,10 +400,11 @@ def fetch_detail_records(
         WHERE asr.data IS NOT NULL AND asr.data != ''
           AND (? = '' OR at.project = ?)
           AND (? = '' OR at.lang = ?)
+          {subject_filter}
         ORDER BY ar.id, reviewer.username
     """
     with closing(sqlite3.connect(dbfile)) as connection:
-        cursor = connection.execute(query, (project, project, language, language))
+        cursor = connection.execute(query, (project, project, language, language, *subject_parameters))
         columns = [column[0] for column in cursor.description]
         rows = cursor.fetchall()
 
@@ -323,9 +465,91 @@ def fetch_detail_records(
     return records
 
 
+def summarize_database_state(
+    dbfile: str,
+    professional_raters: Set[str],
+    project: str = "",
+    language: str = "",
+    valid_users: Optional[Set[str]] = None,
+) -> Dict[str, int]:
+    """Count selected result rows and annotation coverage before scoring.
+
+    Args:
+        dbfile: Path to the SQLite experiment database.
+        professional_raters: Reviewer usernames to include, case-insensitively.
+        project: Project filter; an empty string includes all projects.
+        language: Language filter; an empty string includes all languages.
+        valid_users: Exact subject usernames to include; None includes all.
+
+    Returns:
+        Counts of distinct result, ASR-backed, in-booth-annotated, and
+        professional-annotated utterances, plus ASR-backed utterances missing
+        professional annotation.
+
+    Raises:
+        sqlite3.Error: If the database cannot be queried.
+    """
+    subject_filter, subject_parameters = _valid_user_filter(valid_users)
+    query = f"""
+        SELECT
+            ar.id AS result_id,
+            asr.data AS asr_data,
+            aa.data AS in_booth_data,
+            reviewer.username AS reviewer_username,
+            ra.data AS reviewer_data
+        FROM audio_results ar
+        JOIN audio_trials at ON at.id = ar.trial
+        LEFT JOIN audio_asr asr ON asr.ref = ar.id
+        LEFT JOIN audio_annotations aa ON aa.ref = ar.id
+        LEFT JOIN review_annotations ra ON ra.ref = ar.id
+        LEFT JOIN users reviewer ON reviewer.id = ra.labeler
+        WHERE (? = '' OR at.project = ?)
+          AND (? = '' OR at.lang = ?)
+          {subject_filter}
+    """
+    allowed_raters = {username.casefold() for username in professional_raters}
+    all_result_ids: Set[int] = set()
+    asr_result_ids: Set[int] = set()
+    in_booth_result_ids: Set[int] = set()
+    professional_result_ids: Set[int] = set()
+    with closing(sqlite3.connect(dbfile)) as connection:
+        rows = connection.execute(query, (project, project, language, language, *subject_parameters)).fetchall()
+
+    for result_id, asr_data, in_booth_data, reviewer_username, reviewer_data in rows:
+        all_result_ids.add(result_id)
+        if asr_data:
+            asr_result_ids.add(result_id)
+        if parse_truth_values(in_booth_data):
+            in_booth_result_ids.add(result_id)
+        if (
+            reviewer_username
+            and reviewer_username.casefold() in allowed_raters
+            and parse_truth_values(reviewer_data)
+        ):
+            professional_result_ids.add(result_id)
+
+    return {
+        "result_utterances": len(all_result_ids),
+        "asr_utterances": len(asr_result_ids),
+        "in_booth_utterances": len(in_booth_result_ids),
+        "professional_rater_utterances": len(professional_result_ids),
+        "missing_professional_rater_utterances": len(asr_result_ids - professional_result_ids),
+    }
+
+
 def build_detail_dataframe(
     records: Sequence[Dict[str, Any]], professional_raters: Iterable[str]
 ) -> pd.DataFrame:
+    """Build the per-utterance DataFrame with a stable set of columns.
+
+    Args:
+        records: Scored trial records from ``fetch_detail_records``.
+        professional_raters: Usernames whose individual columns are included.
+
+    Returns:
+        DataFrame with base columns and truth-value and score columns for
+        each configured rater.
+    """
     columns = list(BASE_COLUMNS)
     for rater in sorted(set(professional_raters)):
         columns.extend([f"rater_{rater}_truth_values", f"rater_{rater}_fraction_correct"])
@@ -333,7 +557,14 @@ def build_detail_dataframe(
 
 
 def summarize_by_snr(detail_df: pd.DataFrame) -> pd.DataFrame:
-    """Average the three recognition scores for each project and SNR."""
+    """Average the three recognition scores for each project and SNR.
+
+    Args:
+        detail_df: Per-utterance scores with project, SNR, and in-booth ID.
+
+    Returns:
+        DataFrame of project/SNR groups, utterance counts, and mean scores.
+    """
     columns = ["project", "snr", "utterance_count", *SCORE_COLUMNS]
     if detail_df.empty:
         return pd.DataFrame(columns=columns)
@@ -347,7 +578,17 @@ def summarize_by_snr(detail_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fit_srt(snrs: Sequence[float], scores: Sequence[float]) -> float:
-    """Fit a two-parameter logistic curve and return its 50% point (x0)."""
+    """Fit a two-parameter logistic curve and return its 50% point.
+
+    Args:
+        snrs: SNR values corresponding to the scores.
+        scores: Fraction-correct values at each SNR.
+
+    Returns:
+        Fitted midpoint in dB. If all finite scores exceed or fall below 0.5,
+        returns the minimum or maximum observed SNR respectively. Returns NaN
+        when the remaining data are insufficient or the fit fails.
+    """
     x = np.asarray(snrs, dtype=float)
     y = np.asarray(scores, dtype=float)
     valid = np.isfinite(x) & np.isfinite(y)
@@ -362,6 +603,16 @@ def fit_srt(snrs: Sequence[float], scores: Sequence[float]) -> float:
         return float("nan")
 
     def logistic(values, steepness, midpoint):
+        """Evaluate the logistic response at the given SNR values.
+
+        Args:
+            values: SNR values at which to evaluate the curve.
+            steepness: Positive logistic slope parameter.
+            midpoint: SNR at which the response is 0.5.
+
+        Returns:
+            Array of predicted fractions correct.
+        """
         return 1.0 / (1.0 + np.exp(np.clip(-steepness * (values - midpoint), -700, 700)))
 
     x_range = float(np.max(x) - np.min(x))
@@ -389,7 +640,16 @@ def fit_srt(snrs: Sequence[float], scores: Sequence[float]) -> float:
 
 
 def summarize_subject_snr(detail_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Build subject/project/SNR means and one logistic SRT row per subject/project."""
+    """Build subject/SNR means and fitted SRTs per subject and project.
+
+    Args:
+        detail_df: Per-utterance scores, including individual rater columns.
+
+    Returns:
+        Tuple containing the subject/project/SNR mean-score DataFrame and
+        the subject/project SRT DataFrame. The latter includes individual
+        professional fits and their mean and sample standard deviation.
+    """
     group_columns = ["subject_id", "subject_username", "project", "snr"]
     subject_columns = [*group_columns, "utterance_count", *SCORE_COLUMNS]
     if detail_df.empty:
@@ -457,7 +717,15 @@ def summarize_subject_snr(detail_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Dat
 
 
 def create_comparison_plot(detail_df: pd.DataFrame, output_path: str) -> None:
-    """Save a row of scatter plots comparing the three recognition sources."""
+    """Save a row of scatter plots comparing the three recognition sources.
+
+    Args:
+        detail_df: Per-utterance in-booth, professional, and ASR scores.
+        output_path: Destination image path accepted by Matplotlib.
+
+    Raises:
+        OSError: If the plot cannot be written.
+    """
     comparisons = [
         ("in_booth_fraction_correct", "professional_fraction_correct", "In-booth vs. Professional"),
         ("in_booth_fraction_correct", "asr_fraction_correct", "In-booth vs. ASR"),
@@ -477,7 +745,15 @@ def create_comparison_plot(detail_df: pd.DataFrame, output_path: str) -> None:
 
 
 def create_srt_comparison_plot(srts_df: pd.DataFrame, output_path: str) -> None:
-    """Plot the three paired SRT comparisons, showing professional-rater SD."""
+    """Plot the three paired SRT comparisons, showing professional-rater SD.
+
+    Args:
+        srts_df: Per-subject/project SRTs and professional-rater sample SDs.
+        output_path: Destination image path accepted by Matplotlib.
+
+    Raises:
+        OSError: If the plot cannot be written.
+    """
     comparisons = [
         ("in_booth_srt", "professional_srt", "In-booth vs. Professional"),
         ("in_booth_srt", "asr_srt", "In-booth vs. ASR"),
@@ -534,11 +810,194 @@ def create_srt_comparison_plot(srts_df: pd.DataFrame, output_path: str) -> None:
     plt.close(figure)
 
 
+def srt_differences(srts_df: pd.DataFrame, comparison_column: str) -> pd.Series:
+    """Calculate finite paired SRT differences from the professional mean.
+
+    Args:
+        srts_df: Per-subject SRT DataFrame containing ``professional_srt``.
+        comparison_column: Column containing the SRT being compared.
+
+    Returns:
+        Comparison minus professional SRT for finite pairs, preserving the
+        input row indices.
+    """
+    valid = np.isfinite(srts_df[comparison_column]) & np.isfinite(srts_df["professional_srt"])
+    return srts_df.loc[valid, comparison_column] - srts_df.loc[valid, "professional_srt"]
+
+
+def pooled_professional_srt_sd(srts_df: pd.DataFrame) -> float:
+    """Pool within-subject professional-rater SRT variability.
+
+    Args:
+        srts_df: SRT rows for one project, including each subject's number of
+            valid professional fits and their sample standard deviation.
+
+    Returns:
+        Pooled within-subject sample SD in dB, or NaN if no subject has at
+        least two valid professional-rater fits.
+    """
+    counts = srts_df["professional_srt_count"]
+    stds = srts_df["professional_srt_std"]
+    valid = (counts >= 2) & np.isfinite(stds)
+    degrees = counts[valid] - 1
+    if degrees.empty:
+        return float("nan")
+    return float(np.sqrt((degrees * stds[valid] ** 2).sum() / degrees.sum()))
+
+
+def format_srt_difference_sd_summary(differences: pd.Series, rater_sd: float) -> str:
+    """Describe outliers relative to pooled professional-rater variability.
+
+    Args:
+        differences: Finite paired SRT differences.
+        rater_sd: Pooled within-subject professional-rater SD in dB.
+
+    Returns:
+        Observed outlier count and a Gaussian benchmark conditional on the
+        comparison differences having this SD. Reports unestimable results.
+    """
+    count = len(differences)
+    if not count or not math.isfinite(rater_sd):
+        return f"Outliers outside mean +/- 1 rater SD: not estimable (n={count})"
+    mean = float(differences.mean())
+    outside = int(((differences < mean - rater_sd) | (differences > mean + rater_sd)).sum())
+    if rater_sd == 0:
+        return f"Outliers outside mean +/- 1 rater SD: {outside}/{count}; Gaussian benchmark not applicable (SD=0)"
+    gaussian_fraction = math.erfc(1 / math.sqrt(2))
+    expected = count * gaussian_fraction
+    return (
+        f"Outliers outside mean +/- 1 rater SD: {outside}/{count}; "
+        f"Gaussian benchmark (matched SD): {expected:.2f} ({100 * gaussian_fraction:.1f}%)"
+    )
+
+
+def print_srt_difference_sd_summaries(srts_df: pd.DataFrame) -> None:
+    """Print the SD-bound counts for each project and comparison.
+
+    Args:
+        srts_df: Per-subject/project SRTs and professional-rater counts and SDs.
+    """
+    for project, rows in srts_df.groupby("project", dropna=False, sort=True):
+        rater_sd = pooled_professional_srt_sd(rows)
+        sd_text = f"{rater_sd:.2f} dB" if math.isfinite(rater_sd) else "not estimable"
+        print(f"Professional-rater pooled within-subject SD ({project}): {sd_text}")
+        for column, label in (("in_booth_srt", "In-booth"), ("asr_srt", "ASR")):
+            summary = format_srt_difference_sd_summary(srt_differences(rows, column), rater_sd)
+            print(f"{label} vs. Professional ({project}): {summary}")
+
+
+def plot_srt_difference_histogram(
+    srts_df: pd.DataFrame, comparison_column: str, title: str, axis, num_bins: int = 10
+) -> None:
+    """Plot paired SRT differences with pooled professional-rater SD bounds.
+
+    Args:
+        srts_df: One project's SRTs, subject IDs, and professional-rater SDs.
+        comparison_column: SRT column to compare with the professional mean.
+        title: Histogram panel title.
+        axis: Matplotlib Axes on which to draw the histogram.
+        num_bins: Number of histogram bins.
+    """
+    differences = srt_differences(srts_df, comparison_column)
+    valid = srts_df.loc[
+        np.isfinite(srts_df[comparison_column]) & np.isfinite(srts_df["professional_srt"])
+    ]
+    axis.set_title(f"{title} (n={len(differences)})")
+    axis.set_xlabel("SRT difference from professional mean (dB)")
+    axis.set_ylabel("Subjects")
+    axis.grid(axis="y", alpha=0.3)
+    if differences.empty:
+        axis.text(0.5, 0.5, "No valid data", ha="center", va="center", transform=axis.transAxes)
+        return
+
+    counts, bins, patches = axis.hist(differences, bins=num_bins, edgecolor="black", alpha=0.7)
+    bin_indices = np.minimum(np.searchsorted(bins, differences, side="right") - 1, len(patches) - 1)
+    labels = valid["subject_username"].where(
+        valid["subject_username"].notna() & valid["subject_username"].astype(str).str.strip().ne(""),
+        valid["subject_id"].astype(str),
+    )
+    for bin_index, patch in enumerate(patches):
+        for position, label in enumerate(labels.iloc[np.flatnonzero(bin_indices == bin_index)]):
+            axis.text(
+                patch.get_x() + patch.get_width() / 2,
+                position + 0.5,
+                str(label),
+                ha="center",
+                va="center",
+                fontsize=7,
+                clip_on=True,
+            )
+    axis.set_ylim(0, max(counts) + 1)
+
+    rater_sd = pooled_professional_srt_sd(srts_df)
+    if math.isfinite(rater_sd):
+        mean = float(differences.mean())
+        axis.axvspan(
+            mean - rater_sd, mean + rater_sd, color="orange", alpha=0.2,
+            label=f"Mean +/- 1 pooled rater SD ({rater_sd:.2f} dB)",
+        )
+        axis.axvline(mean, color="darkorange", linestyle="--", label=f"Mean ({mean:.2f} dB)")
+        axis.legend(
+            fontsize=8, title=format_srt_difference_sd_summary(differences, rater_sd), title_fontsize=8,
+            loc="upper center", bbox_to_anchor=(0.5, -0.18),
+        )
+    else:
+        axis.text(
+            0.02, 0.98, "Pooled rater SD not estimable",
+            transform=axis.transAxes, va="top", fontsize=8,
+        )
+
+
+def create_srt_difference_histogram(
+    srts_df: pd.DataFrame, output_path: str, num_bins: int = 10
+) -> None:
+    """Save one row of in-booth and ASR difference histograms per project.
+
+    Args:
+        srts_df: Nonempty per-subject/project SRT DataFrame.
+        output_path: Destination image path accepted by Matplotlib.
+        num_bins: Number of bins in each histogram.
+
+    Raises:
+        OSError: If the plot cannot be written.
+    """
+    comparisons = [("in_booth_srt", "In-booth"), ("asr_srt", "ASR")]
+    projects = list(srts_df.groupby("project", dropna=False, sort=True))
+    max_count = 0
+    for _, rows in projects:
+        for column, _ in comparisons:
+            values = srt_differences(rows, column)
+            if not values.empty:
+                max_count = max(max_count, int(np.histogram(values, bins=num_bins)[0].max()))
+    row_height = max(6, max_count * 0.2 + 2)
+    figure, axes = plt.subplots(
+        len(projects), len(comparisons), figsize=(15, row_height * len(projects)), squeeze=False
+    )
+    for row_index, (project, rows) in enumerate(projects):
+        for column_index, (column, label) in enumerate(comparisons):
+            plot_srt_difference_histogram(
+                rows, column, f"{label} vs. Professional ({project})",
+                axes[row_index, column_index], num_bins,
+            )
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=150)
+    plt.close(figure)
+
+
 def bland_altman_statistics(reference: Sequence[float], comparison: Sequence[float]) -> Dict[str, Any]:
     """Return bias, confidence interval, and limits of agreement.
 
     Differences are comparison minus reference. Bias significance is tested
     with a two-sided one-sample t-test against zero.
+
+    Args:
+        reference: Reference SRT values.
+        comparison: Corresponding SRT values from the comparison method.
+
+    Returns:
+        Dictionary containing the number of finite pairs, mean and sample SD
+        of differences, bias confidence interval and p-value, and 95% limits
+        of agreement. Unestimable statistics are NaN.
     """
     paired = pd.DataFrame({"reference": reference, "comparison": comparison}).dropna()
     paired = paired[np.isfinite(paired["reference"]) & np.isfinite(paired["comparison"])]
@@ -567,7 +1026,16 @@ def bland_altman_statistics(reference: Sequence[float], comparison: Sequence[flo
 
 
 def icc_3_1_statistics(reference: Sequence[float], comparison: Sequence[float]) -> Dict[str, float]:
-    """Calculate ICC(3,1) and its F-test against zero reliability."""
+    """Calculate ICC(3,1) and its F-test against zero reliability.
+
+    Args:
+        reference: Reference SRT values.
+        comparison: Corresponding SRT values from the comparison method.
+
+    Returns:
+        Dictionary with ``icc_3_1``, ``icc_f_statistic``, and ``icc_p_value``.
+        Unestimable statistics are NaN.
+    """
     paired = pd.DataFrame({"reference": reference, "comparison": comparison}).dropna()
     paired = paired[np.isfinite(paired["reference"]) & np.isfinite(paired["comparison"])]
     values = paired.to_numpy(dtype=float)
@@ -595,12 +1063,28 @@ def icc_3_1_statistics(reference: Sequence[float], comparison: Sequence[float]) 
 
 
 def icc_3_1(reference: Sequence[float], comparison: Sequence[float]) -> float:
-    """Return two-way mixed, consistency, single-measure ICC(3,1)."""
+    """Calculate two-way mixed, consistency, single-measure ICC(3,1).
+
+    Args:
+        reference: Reference SRT values.
+        comparison: Corresponding SRT values from the comparison method.
+
+    Returns:
+        ICC(3,1), or NaN if it cannot be estimated.
+    """
     return icc_3_1_statistics(reference, comparison)["icc_3_1"]
 
 
 def summarize_srt_agreement(srts_df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate Bland–Altman and ICC(3,1) against professional-rater consensus."""
+    """Calculate Bland–Altman and ICC(3,1) against professional-rater consensus.
+
+    Args:
+        srts_df: Per-subject/project in-booth, ASR, and professional SRTs.
+
+    Returns:
+        DataFrame with one row per project and comparison, including paired
+        counts, agreement statistics, and associated significance tests.
+    """
     output = []
     comparisons = [("in_booth", "in_booth_srt"), ("asr", "asr_srt")]
     for project, project_rows in srts_df.groupby("project", dropna=False):
@@ -650,6 +1134,15 @@ def summarize_noninferiority(
     is that it is smaller. Noninferiority is declared only when the one-sided
     95% upper t-confidence bound is below the margin. This inference assumes
     independent subjects and approximately normal paired differences.
+
+    Args:
+        srts_df: Per-subject/project SRTs, including JSON-encoded individual
+            professional-rater fits.
+        margin_db: Noninferiority margin for excess mean absolute error in dB.
+
+    Returns:
+        DataFrame with paired-subject counts, error statistics, one-sided
+        test results, and noninferiority decisions for each project.
     """
     output = []
     for project, project_rows in srts_df.groupby("project", dropna=False):
@@ -750,7 +1243,17 @@ def format_srt_agreement_report(
     noninferiority_df: Optional[pd.DataFrame] = None,
     margin_db: float = 2.0,
 ) -> str:
-    """Explain agreement metrics and report their nominal statistical significance."""
+    """Explain agreement metrics and report their nominal statistical significance.
+
+    Args:
+        agreement_df: Agreement statistics from ``summarize_srt_agreement``.
+        alpha: Nominal significance threshold for interpreting p-values.
+        noninferiority_df: Optional results from ``summarize_noninferiority``.
+        margin_db: Noninferiority margin in dB used in the report text.
+
+    Returns:
+        Human-readable, newline-separated report without a trailing newline.
+    """
     lines = [
         "SRT agreement analysis",
         "Reference: mean SRT across professional raters with successful fits.",
@@ -843,7 +1346,20 @@ def write_srt_agreement_report(
     noninferiority_df: Optional[pd.DataFrame] = None,
     margin_db: float = 2.0,
 ) -> str:
-    """Write and return the human-readable SRT agreement report."""
+    """Write and return the human-readable SRT agreement report.
+
+    Args:
+        agreement_df: Agreement statistics from ``summarize_srt_agreement``.
+        output_path: Destination UTF-8 text file; parent directories are created.
+        noninferiority_df: Optional results from ``summarize_noninferiority``.
+        margin_db: Noninferiority margin in dB used in the report text.
+
+    Returns:
+        Report text without the trailing newline written to the file.
+
+    Raises:
+        OSError: If the directory or report cannot be created or written.
+    """
     report = format_srt_agreement_report(
         agreement_df,
         noninferiority_df=noninferiority_df,
@@ -857,6 +1373,15 @@ def write_srt_agreement_report(
 
 
 def _write_csv(dataframe: pd.DataFrame, path: str) -> None:
+    """Write a DataFrame without its index and print the number of rows.
+
+    Args:
+        dataframe: Rows to write.
+        path: Destination CSV path; parent directories are created.
+
+    Raises:
+        OSError: If the directory or CSV cannot be created or written.
+    """
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
     dataframe.to_csv(path, index=False)
@@ -864,7 +1389,15 @@ def _write_csv(dataframe: pd.DataFrame, path: str) -> None:
 
 
 def resolve_test_name(project_filter: str, detail_df: pd.DataFrame) -> str:
-    """Choose a filename token from the project filter or sole project present."""
+    """Choose a filename token from the project filter or sole project present.
+
+    Args:
+        project_filter: Explicit project name, or an empty string to infer it.
+        detail_df: Per-utterance DataFrame containing a project column.
+
+    Returns:
+        Sanitized project token, or ``all`` if there is no unique usable name.
+    """
     if project_filter:
         candidate = project_filter
     else:
@@ -874,37 +1407,253 @@ def resolve_test_name(project_filter: str, detail_df: pd.DataFrame) -> str:
     return safe_name or "all"
 
 
-def resolve_output_path(path: str, test_name: str) -> str:
-    """Substitute the test token in a default or user-provided output path."""
-    return path.replace("{test_name}", test_name)
+def resolve_output_path(path: str, test_name: str, output_dir: str = "") -> str:
+    """Substitute the test token and put relative paths under output_dir.
+
+    Args:
+        path: Output path, optionally containing ``{test_name}``.
+        test_name: Replacement token.
+        output_dir: Directory prepended to relative output paths.
+
+    Returns:
+        Resolved output path; absolute paths ignore output_dir.
+    """
+    return os.path.join(output_dir, path.replace("{test_name}", test_name))
+
+
+def find_discrepant_utterances(
+    detail_df: pd.DataFrame,
+    professional_raters: Iterable[str],
+    tolerance: float = 1e-9,
+) -> pd.DataFrame:
+    """Select trials where available in-booth, ASR, or professional scores differ.
+
+    Args:
+        detail_df: Per-utterance DataFrame with available score columns.
+        professional_raters: Reviewer usernames to include, case-insensitively.
+        tolerance: Absolute tolerance for considering two scores equal.
+
+    Returns:
+        Copy of discrepant rows with a ``disagreements`` description column
+        when nonempty. Missing or nonfinite scores are ignored.
+    """
+    professional_names = {name.casefold() for name in professional_raters}
+    score_columns = [
+        ("In-booth", "in_booth_fraction_correct"),
+        ("ASR", "asr_fraction_correct"),
+    ]
+    for column in detail_df.columns:
+        if not column.startswith("rater_") or not column.endswith("_fraction_correct"):
+            continue
+        rater = column[len("rater_"):-len("_fraction_correct")]
+        if rater.casefold() in professional_names:
+            score_columns.append((f"Professional: {rater}", column))
+    score_columns = [(name, column) for name, column in score_columns if column in detail_df.columns]
+
+    discrepant_indices = []
+    descriptions = {}
+    for index, row in detail_df.iterrows():
+        observed = []
+        for name, column in score_columns:
+            value = pd.to_numeric(pd.Series([row[column]]), errors="coerce").iloc[0]
+            if pd.notna(value) and np.isfinite(value):
+                observed.append((name, float(value)))
+        differences = [
+            f"{left_name} ({left_value:.3f}) vs {right_name} ({right_value:.3f})"
+            for position, (left_name, left_value) in enumerate(observed)
+            for right_name, right_value in observed[position + 1:]
+            if not np.isclose(left_value, right_value, atol=tolerance, rtol=0.0)
+        ]
+        if differences:
+            discrepant_indices.append(index)
+            descriptions[index] = "; ".join(differences)
+
+    discrepant = detail_df.loc[discrepant_indices].copy()
+    if not discrepant.empty:
+        discrepant["disagreements"] = [descriptions[index] for index in discrepant_indices]
+    return discrepant
+
+
+def _format_asr_words(value: Any) -> str:
+    """Format the recognized-word list stored in the detail DataFrame.
+
+    Args:
+        value: Word sequence, JSON-encoded list, or other stored value.
+
+    Returns:
+        Space-separated words, an empty string for missing data, or the
+        original/stringified value when it is not a word list.
+    """
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(str(word) for word in value)
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return ""
+    if isinstance(value, str):
+        try:
+            words = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+        if isinstance(words, list):
+            return " ".join(str(word) for word in words)
+    return str(value)
+
+
+def write_discrepancy_html(
+    detail_df: pd.DataFrame,
+    professional_raters: Iterable[str],
+    test_name: str,
+    output_path: str,
+) -> int:
+    """Write escaped discrepancy rows, including recognized ASR words, to HTML.
+
+    Args:
+        detail_df: Per-utterance DataFrame with scores and recognized words.
+        professional_raters: Reviewer usernames to include in comparisons.
+        test_name: Test name displayed in the report.
+        output_path: Destination HTML path; parent directories are created.
+
+    Returns:
+        Number of discrepant utterances written.
+
+    Raises:
+        OSError: If the HTML file cannot be created or written.
+    """
+    output_path = os.path.abspath(output_path)
+    discrepancies = find_discrepant_utterances(detail_df, professional_raters)
+    rater_names = {name.casefold() for name in professional_raters}
+    rater_columns = [
+        column for column in discrepancies.columns
+        if column.startswith("rater_")
+        and column.endswith("_fraction_correct")
+        and column[len("rater_"):-len("_fraction_correct")].casefold() in rater_names
+    ]
+    truth_column = "ground_truth" if "ground_truth" in discrepancies.columns else "answer"
+    preferred_columns = [
+        "subject_username", "in_booth_id", "test_utterance_id", "project", "snr",
+        truth_column, "asr_words", "in_booth_fraction_correct", "asr_fraction_correct",
+        "professional_fraction_correct", *rater_columns, "disagreements",
+    ]
+    columns = list(dict.fromkeys(column for column in preferred_columns if column in discrepancies.columns))
+    display = discrepancies[columns].copy()
+    if "asr_words" in display.columns:
+        display["asr_words"] = display["asr_words"].map(_format_asr_words)
+    display = display.rename(
+        columns={
+            "subject_username": "Subject",
+            "in_booth_id": "In-booth ID",
+            "test_utterance_id": "Test utterance ID",
+            "project": "Test",
+            "snr": "SNR (dB)",
+            "ground_truth": "Ground-truth keywords",
+            "answer": "Ground-truth keywords",
+            "asr_words": "ASR recognized words",
+            "in_booth_fraction_correct": "In-booth fraction correct",
+            "asr_fraction_correct": "ASR fraction correct",
+            "professional_fraction_correct": "Professional mean fraction correct",
+            "disagreements": "Disagreements",
+        }
+    )
+    display = display.rename(
+        columns={
+            column: f"Professional rater: {column[len('rater_'):-len('_fraction_correct')]} fraction correct"
+            for column in rater_columns
+        }
+    )
+    safe_test_name = re.sub(r"[^A-Za-z0-9 _-]", "_", test_name)
+    table_html = (
+        display.to_html(index=False, escape=True, border=0, na_rep="")
+        if not display.empty
+        else "<p>No utterances with differing recognition scores were found.</p>"
+    )
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{safe_test_name} recognition discrepancies</title>
+<style>
+body {{ font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1200px; padding: 0 1rem; color: #202124; }}
+h1 {{ font-size: 1.5rem; }}
+table {{ border-collapse: collapse; width: 100%; font-size: .9rem; }}
+th, td {{ border: 1px solid #d5d8dc; padding: .45rem .6rem; text-align: left; vertical-align: top; }}
+th {{ background: #eef2f5; position: sticky; top: 0; }}
+tr:nth-child(even) {{ background: #f7f9fa; }}
+</style>
+</head>
+<body>
+<h1>{safe_test_name}: recognition disagreements</h1>
+<p>{len(display)} utterances have at least one differing in-booth, ASR, or professional-rater fraction-correct score.</p>
+{table_html}
+</body>
+</html>
+"""
+    try:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as file:
+            file.write(page)
+    except OSError as exc:
+        raise OSError(f"Failed to create/write discrepancy HTML at {output_path}: {exc}") from exc
+    if not os.path.isfile(output_path):
+        raise OSError(f"Discrepancy HTML was not created at {output_path}")
+    return len(discrepancies)
 
 
 def main(argv: List[str]) -> None:
+    """Run the configured ASR scoring, analysis, and report pipeline.
+
+    Args:
+        argv: Remaining command-line arguments supplied by ``absl.app``;
+            ignored because configuration is read from flags.
+    """
     del argv
     logging.info("Reading ASR-backed trials from %s", FLAGS.dbfile)
     homonyms = read_homonyms(FLAGS.homonyms)
     professional_raters = read_professional_raters(FLAGS.professional_raters)
+    valid_users = read_valid_users(FLAGS.valid_users_file) if FLAGS.valid_users_file else None
+    database_state = summarize_database_state(
+        FLAGS.dbfile,
+        professional_raters,
+        project=FLAGS.project,
+        language=FLAGS.language,
+        valid_users=valid_users,
+    )
+    print(
+        "Database state before scoring: "
+        f"results={database_state['result_utterances']}, "
+        f"with_asr={database_state['asr_utterances']}, "
+        f"with_in_booth_data={database_state['in_booth_utterances']}, "
+        f"with_professional_rater_data={database_state['professional_rater_utterances']}, "
+        "ASR-backed utterances missing professional-rater data="
+        f"{database_state['missing_professional_rater_utterances']}"
+    )
     records = fetch_detail_records(
         FLAGS.dbfile,
         professional_raters,
         homonyms,
         project=FLAGS.project,
         language=FLAGS.language,
+        valid_users=valid_users,
     )
     detail_df = build_detail_dataframe(records, professional_raters)
     test_name = resolve_test_name(FLAGS.project, detail_df)
     snr_df = summarize_by_snr(detail_df)
     subject_snr_df, srt_df = summarize_subject_snr(detail_df)
 
-    output_csv = resolve_output_path(FLAGS.output_csv, test_name)
-    snr_summary_csv = resolve_output_path(FLAGS.snr_summary_csv, test_name)
-    subject_snr_csv = resolve_output_path(FLAGS.subject_snr_csv, test_name)
-    srt_csv = resolve_output_path(FLAGS.srt_csv, test_name)
-    scatter_plot = resolve_output_path(FLAGS.scatter_plot, test_name)
-    srt_scatter_plot = resolve_output_path(FLAGS.srt_scatter_plot, test_name)
-    agreement_csv = resolve_output_path(FLAGS.agreement_csv, test_name)
-    agreement_report_path = resolve_output_path(FLAGS.agreement_report, test_name)
-    noninferiority_csv = resolve_output_path(FLAGS.noninferiority_csv, test_name)
+    output_csv = resolve_output_path(FLAGS.output_csv, test_name, FLAGS.output_dir)
+    snr_summary_csv = resolve_output_path(FLAGS.snr_summary_csv, test_name, FLAGS.output_dir)
+    subject_snr_csv = resolve_output_path(FLAGS.subject_snr_csv, test_name, FLAGS.output_dir)
+    srt_csv = resolve_output_path(FLAGS.srt_csv, test_name, FLAGS.output_dir)
+    scatter_plot = resolve_output_path(FLAGS.scatter_plot, test_name, FLAGS.output_dir)
+    srt_scatter_plot = resolve_output_path(FLAGS.srt_scatter_plot, test_name, FLAGS.output_dir)
+    srt_histogram_plot = resolve_output_path(FLAGS.srt_histogram_plot, test_name, FLAGS.output_dir)
+    agreement_csv = resolve_output_path(FLAGS.agreement_csv, test_name, FLAGS.output_dir)
+    agreement_report_path = resolve_output_path(FLAGS.agreement_report, test_name, FLAGS.output_dir)
+    noninferiority_csv = resolve_output_path(FLAGS.noninferiority_csv, test_name, FLAGS.output_dir)
+    discrepancy_html = resolve_output_path(FLAGS.discrepancy_html, test_name, FLAGS.output_dir)
+
+    if not FLAGS.no_plot:
+        for path in (scatter_plot, srt_scatter_plot, srt_histogram_plot):
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
     _write_csv(detail_df, output_csv)
     _write_csv(snr_df, snr_summary_csv)
@@ -914,6 +1663,13 @@ def main(argv: List[str]) -> None:
     _write_csv(agreement_df, agreement_csv)
     noninferiority_df = summarize_noninferiority(srt_df, FLAGS.noninferiority_margin_db)
     _write_csv(noninferiority_df, noninferiority_csv)
+    discrepancy_count = write_discrepancy_html(
+        detail_df,
+        professional_raters,
+        test_name,
+        discrepancy_html,
+    )
+    print(f"Wrote {discrepancy_count} discrepant utterances to {discrepancy_html}")
     agreement_report = write_srt_agreement_report(
         agreement_df,
         agreement_report_path,
@@ -922,12 +1678,16 @@ def main(argv: List[str]) -> None:
     )
     print(agreement_report)
     print(f"Wrote agreement explanation to {agreement_report_path}")
+    if not srt_df.empty:
+        print_srt_difference_sd_summaries(srt_df)
     if not FLAGS.no_plot and not detail_df.empty:
         create_comparison_plot(detail_df, scatter_plot)
         print(f"Wrote comparison plot to {scatter_plot}")
     if not FLAGS.no_plot and not srt_df.empty:
         create_srt_comparison_plot(srt_df, srt_scatter_plot)
         print(f"Wrote SRT comparison plot to {srt_scatter_plot}")
+        create_srt_difference_histogram(srt_df, srt_histogram_plot, FLAGS.histogram_bins)
+        print(f"Wrote SRT difference histogram to {srt_histogram_plot}")
 
 
 if __name__ == "__main__":
@@ -940,15 +1700,26 @@ if __name__ == "__main__":
     )
     flags.DEFINE_string("project", "", "Optional project name to include; empty includes all projects.")
     flags.DEFINE_string("language", "", "Optional language code to include; empty includes all languages.")
+    flags.DEFINE_string(
+        "output_dir", ".", "Directory for relative output filenames; absolute filenames are unchanged."
+    )
+    flags.DEFINE_string(
+        "valid_users_file",
+        "metadata/valid_users.txt",
+        "Optional file of exact subject usernames to include, one per line; empty includes all subjects.",
+    )
     flags.DEFINE_string("output_csv", "recognition_{test_name}_by_utterance.csv", "Per-utterance CSV output.")
     flags.DEFINE_string("snr_summary_csv", "recognition_{test_name}_by_snr.csv", "Project/SNR summary CSV output.")
     flags.DEFINE_string("subject_snr_csv", "recognition_{test_name}_by_subject_snr.csv", "Subject/project/SNR summary CSV output.")
     flags.DEFINE_string("srt_csv", "recognition_{test_name}_srts.csv", "Per-subject/project SRT and score-list CSV output.")
     flags.DEFINE_string("scatter_plot", "recognition_{test_name}_comparison.png", "Three-panel comparison plot output.")
     flags.DEFINE_string("srt_scatter_plot", "recognition_{test_name}_srt_comparison.png", "Three-panel SRT comparison plot output.")
+    flags.DEFINE_string("srt_histogram_plot", "recognition_{test_name}_srt_histogram.png", "SRT difference histogram output.")
+    flags.DEFINE_integer("histogram_bins", 10, "Number of bins for SRT difference histograms.", lower_bound=1)
     flags.DEFINE_string("agreement_csv", "recognition_{test_name}_srt_agreement.csv", "Bland–Altman and ICC(3,1) summary CSV output.")
     flags.DEFINE_string("agreement_report", "recognition_{test_name}_srt_agreement.txt", "Explanation and significance report for SRT agreement statistics.")
     flags.DEFINE_string("noninferiority_csv", "recognition_{test_name}_srt_noninferiority.csv", "ASR noninferiority results CSV output.")
+    flags.DEFINE_string("discrepancy_html", "recognition_{test_name}_discrepancies.html", "Per-utterance recognition disagreement HTML output.")
     flags.DEFINE_float("noninferiority_margin_db", 2.0, "Maximum excess ASR SRT error allowed for noninferiority, in dB.")
-    flags.DEFINE_bool("no_plot", False, "Do not save the comparison plot.")
+    flags.DEFINE_bool("no_plot", False, "Do not save comparison or histogram plots.")
     app.run(main)

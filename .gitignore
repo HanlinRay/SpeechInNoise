@@ -8,6 +8,9 @@ secret_key_google_text_to_speech
 # Audio outputs and junk
 *.wav
 *.mp3
+*.csv
+*.txt
+!metadata/valid_users.txt
 junk
 *.save
 

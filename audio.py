@@ -134,6 +134,15 @@ class AudioBP(DatabaseBP):
         session["q"] = json.dumps(q)
         return self.audio_url(q["filename"])
 
+    def audio_levels(self, db, cur):
+        """How many audios are in the list cur comes from (for the page's
+        "Sentence 3 of 20"). Display only: nothing is stored."""
+        row = db.queryone(
+                f"SELECT MAX(level_number) FROM {self.trials_table} "
+                "WHERE project=? AND lang=? AND trial_number=?",
+                (self.project_key, cur["lang"], cur["trial_number"]))
+        return row[0] if row else None
+
     def audio_start(self, db):
         if "user" not in session:
             abort(400)
@@ -142,7 +151,8 @@ class AudioBP(DatabaseBP):
                 session["cur"], session["q"]))
             return json.dumps({
                 "cur": cur, "next": {1: q}, "name": session["username"],
-                "has_results": json.loads(session["level"]) > 1})
+                "has_results": json.loads(session["level"]) > 1,
+                "levels": self.audio_levels(db, json.loads(session["cur"]))})
         lang, trial_number = json.loads(session["requested"])
         if trial_number is not None:
             cur = [db.queryone(
@@ -169,7 +179,8 @@ class AudioBP(DatabaseBP):
         session["level"] = json.dumps(1)
         return json.dumps({
             "cur": self.audio_url(cur["filename"]), "has_results": False,
-            "next": {1: self.audio_next(db, cur)}, "name": session["username"]})
+            "next": {1: self.audio_next(db, cur)}, "name": session["username"],
+            "levels": self.audio_levels(db, cur)})
 
     def audio_parse(self, db, rowid, fpath, answer, dump=False):
         def wrapped(dump=False):

@@ -5,6 +5,7 @@ import json
 import math
 import os
 import sqlite3
+from unittest import mock
 
 from absl.testing import absltest
 import pandas as pd
@@ -13,6 +14,77 @@ import summarize_asr as sa
 
 
 class SummarizeAsrTest(absltest.TestCase):
+
+    def test_read_valid_users_preserves_case_and_rejects_empty_files(self):
+        path = os.path.join(self.create_tempdir().full_path, "valid_users.txt")
+        with open(path, "w", encoding="utf-8") as file:
+            file.write("# Valid subjects\n\nA1S1 # included\nA1S1\nA2S2\n")
+        self.assertEqual(sa.read_valid_users(path), {"A1S1", "A2S2"})
+        with open(path, "w", encoding="utf-8") as file:
+            file.write("# No usernames\n\n")
+        with self.assertRaisesRegex(ValueError, "contains no usernames"):
+            sa.read_valid_users(path)
+        with self.assertRaises(OSError):
+            sa.read_valid_users(path + ".missing")
+
+    def test_valid_users_filter_applies_to_scoring_and_coverage(self):
+        db_path = os.path.join(self.create_tempdir().full_path, "valid_users.db")
+        with sqlite3.connect(db_path) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+                CREATE TABLE audio_trials (
+                    id INTEGER PRIMARY KEY, project TEXT, lang TEXT, snr REAL,
+                    filename TEXT, answer TEXT
+                );
+                CREATE TABLE audio_results (id INTEGER PRIMARY KEY, subject INTEGER, trial INTEGER);
+                CREATE TABLE audio_asr (ref INTEGER, data TEXT);
+                CREATE TABLE audio_annotations (ref INTEGER, data TEXT);
+                CREATE TABLE review_annotations (ref INTEGER, labeler INTEGER, data TEXT);
+                INSERT INTO users VALUES
+                    (1, 'A1S1'), (2, 'A2P2'), (3, 'test'), (4, 'a1s1'),
+                    (10, 'professional');
+                INSERT INTO audio_trials VALUES
+                    (20, 'quick', 'en', 5, 'test.wav', 'cat'),
+                    (21, 'win', 'en', 4, 'test.wav', 'cat'),
+                    (22, 'quick', 'es', 5, 'test.wav', 'cat');
+                INSERT INTO audio_results VALUES
+                    (30, 1, 20), (31, 2, 20), (32, 3, 20), (33, 4, 20),
+                    (34, 1, 21), (35, 1, 22), (36, 1, 20);
+                INSERT INTO audio_asr VALUES
+                    (30, '{"text":"cat"}'), (31, '{"text":"cat"}'),
+                    (32, '{"text":"cat"}'), (33, '{"text":"cat"}'),
+                    (34, '{"text":"cat"}'), (35, '{"text":"cat"}');
+                INSERT INTO audio_annotations VALUES (30, '[true]');
+                INSERT INTO review_annotations VALUES (30, 10, '[true]');
+                """
+            )
+        raters = {"professional"}
+        records = sa.fetch_detail_records(db_path, raters, {})
+        self.assertLen(records, 6)
+        self.assertEqual(sa.summarize_database_state(db_path, raters)["result_utterances"], 7)
+        records = sa.fetch_detail_records(
+            db_path, raters, {}, project="quick", language="en", valid_users={"A1S1"}
+        )
+        self.assertEqual([record["in_booth_id"] for record in records], [30])
+        self.assertEqual(
+            sa.summarize_database_state(
+                db_path, raters, project="quick", language="en", valid_users={"A1S1"}
+            ),
+            {
+                "result_utterances": 2,
+                "asr_utterances": 1,
+                "in_booth_utterances": 1,
+                "professional_rater_utterances": 1,
+                "missing_professional_rater_utterances": 0,
+            },
+        )
+        for usernames in (set(), {"unknown", "' OR 1=1 --"}):
+            self.assertEmpty(sa.fetch_detail_records(db_path, raters, {}, valid_users=usernames))
+            self.assertEqual(
+                sa.summarize_database_state(db_path, raters, valid_users=usernames)["result_utterances"],
+                0,
+            )
 
     def test_output_names_include_resolved_test_name(self):
         one_project = pd.DataFrame({"project": ["quick", "quick"]})
@@ -26,6 +98,77 @@ class SummarizeAsrTest(absltest.TestCase):
             "recognition_quick_srts.csv",
         )
         self.assertEqual(sa.resolve_output_path("custom/results.csv", "quick"), "custom/results.csv")
+
+    def test_output_directory_applies_only_to_relative_paths(self):
+        self.assertEqual(
+            sa.resolve_output_path("recognition_{test_name}_srts.csv", "quick", "results/large"),
+            "results/large/recognition_quick_srts.csv",
+        )
+        self.assertEqual(
+            sa.resolve_output_path("nested/report.txt", "quick", "results"),
+            "results/nested/report.txt",
+        )
+        self.assertEqual(
+            sa.resolve_output_path("/tmp/recognition_{test_name}.csv", "win", "results"),
+            "/tmp/recognition_win.csv",
+        )
+
+    def test_discrepancy_html_lists_differing_sources_and_asr_words(self):
+        dataframe = pd.DataFrame(
+            [
+                {
+                    "subject_username": "A1S1",
+                    "in_booth_id": 10,
+                    "test_utterance_id": 100,
+                    "project": "quick",
+                    "snr": 5,
+                    "ground_truth": "cat/dog",
+                    "asr_words": ["dog", "near"],
+                    "in_booth_fraction_correct": 0.5,
+                    "asr_fraction_correct": 1.0,
+                    "rater_pro1_fraction_correct": 0.5,
+                    "rater_student_fraction_correct": 0.0,
+                },
+                {
+                    "subject_username": "A1S1",
+                    "in_booth_id": 11,
+                    "test_utterance_id": 101,
+                    "project": "quick",
+                    "snr": 0,
+                    "ground_truth": "red/bed",
+                    "asr_words": ["red"],
+                    "in_booth_fraction_correct": 1.0,
+                    "asr_fraction_correct": 1.0,
+                    "rater_pro1_fraction_correct": 1.0,
+                    "rater_student_fraction_correct": 0.0,
+                },
+            ]
+        )
+        output_dir = os.path.join(self.create_tempdir().full_path, "reports", "quick")
+        output_path = os.path.join(output_dir, "recognition_quick_discrepancies.html")
+
+        count = sa.write_discrepancy_html(dataframe, ["pro1"], "quick", output_path)
+
+        self.assertEqual(count, 1)
+        self.assertTrue(os.path.isdir(output_dir))
+        self.assertTrue(os.path.isfile(output_path))
+        with open(output_path, encoding="utf-8") as file:
+            page = file.read()
+        self.assertIn("ASR recognized words", page)
+        self.assertIn("dog near", page)
+        self.assertIn("ASR fraction correct", page)
+        self.assertIn("Professional rater: pro1", page)
+        self.assertNotIn("Professional rater: student", page)
+        self.assertNotIn("<td>101</td>", page)
+
+    def test_discrepancy_html_write_failure_reports_path(self):
+        blocker = os.path.join(self.create_tempdir().full_path, "not_a_directory")
+        with open(blocker, "w", encoding="utf-8") as file:
+            file.write("file blocks directory creation")
+        output_path = os.path.join(blocker, "recognition_quick_discrepancies.html")
+
+        with self.assertRaisesRegex(OSError, output_path):
+            sa.write_discrepancy_html(pd.DataFrame(), [], "quick", output_path)
 
     def test_score_uses_inline_alternatives_and_global_homonyms(self):
         homonyms = {"cat": {"kat"}, "kat": {"cat"}, "dog": {"puppy"}, "puppy": {"dog"}}
@@ -95,6 +238,51 @@ class SummarizeAsrTest(absltest.TestCase):
         sa.create_comparison_plot(detail, plot_path)
         self.assertTrue(os.path.getsize(plot_path) > 0)
 
+    def test_database_state_counts_missing_professional_rater_data(self):
+        db_path = os.path.join(self.create_tempdir().full_path, "state.db")
+        connection = sqlite3.connect(db_path)
+        connection.executescript(
+            """
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE audio_trials (
+                id INTEGER PRIMARY KEY, project TEXT, lang TEXT
+            );
+            CREATE TABLE audio_results (
+                id INTEGER PRIMARY KEY, subject INTEGER, trial INTEGER
+            );
+            CREATE TABLE audio_asr (ref INTEGER, data TEXT);
+            CREATE TABLE audio_annotations (ref INTEGER, data TEXT);
+            CREATE TABLE review_annotations (ref INTEGER, labeler INTEGER, data TEXT);
+            INSERT INTO users VALUES (1, 'subject');
+            INSERT INTO users VALUES (10, 'pro@example.org');
+            INSERT INTO users VALUES (11, 'student@example.org');
+            INSERT INTO audio_trials VALUES (20, 'quick', 'en');
+            INSERT INTO audio_trials VALUES (21, 'quick', 'en');
+            INSERT INTO audio_results VALUES (30, 1, 20);
+            INSERT INTO audio_results VALUES (31, 1, 21);
+            INSERT INTO audio_asr VALUES (30, '{"text":"cat"}');
+            INSERT INTO audio_asr VALUES (31, '{"text":"dog"}');
+            INSERT INTO audio_annotations VALUES (30, '[true]');
+            INSERT INTO review_annotations VALUES (30, 10, '[true]');
+            INSERT INTO review_annotations VALUES (30, 11, '[false]');
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        summary = sa.summarize_database_state(
+            db_path,
+            {"pro@example.org"},
+            project="quick",
+            language="en",
+        )
+
+        self.assertEqual(summary["result_utterances"], 2)
+        self.assertEqual(summary["asr_utterances"], 2)
+        self.assertEqual(summary["in_booth_utterances"], 1)
+        self.assertEqual(summary["professional_rater_utterances"], 1)
+        self.assertEqual(summary["missing_professional_rater_utterances"], 1)
+
     def test_subject_snr_summary_keeps_snr_lists_and_fits_srt(self):
         detail = pd.DataFrame(
             [
@@ -133,6 +321,143 @@ class SummarizeAsrTest(absltest.TestCase):
         plot_path = os.path.join(self.create_tempdir().full_path, "srt_comparison.png")
         sa.create_srt_comparison_plot(srts, plot_path)
         self.assertTrue(os.path.getsize(plot_path) > 0)
+
+    def test_srt_difference_histogram_labels_subjects_and_pooled_rater_sd(self):
+        srts = pd.DataFrame(
+            {
+                "subject_id": [1, 2, 3, 4, 5],
+                "subject_username": ["A1S1", "A1S2", "A1S3", None, "excluded"],
+                "professional_srt": [10.0, 10.0, 10.0, 10.0, float("nan")],
+                "professional_srt_count": [2, 2, 1, 0, 0],
+                "professional_srt_std": [1.0, 1.0, float("nan"), float("nan"), float("nan")],
+                "asr_srt": [10.0, 11.0, 12.0, 12.0, 14.0],
+            }
+        )
+        figure, axis = sa.plt.subplots()
+        self.addCleanup(sa.plt.close, figure)
+        sa.plot_srt_difference_histogram(srts, "asr_srt", "ASR", axis, num_bins=2)
+
+        self.assertEqual([patch.get_height() for patch in axis.patches[:2]], [1, 3])
+        self.assertEqual([text.get_text() for text in axis.texts], ["A1S1", "A1S2", "A1S3", "4"])
+        self.assertIn("n=4", axis.get_title())
+        mean = 1.25
+        sd = 1.0
+        span = axis.patches[2]
+        span_vertices = axis.transData.inverted().transform(span.get_transform().transform(span.get_path().vertices))
+        self.assertAlmostEqual(span_vertices[:, 0].min(), mean - sd)
+        self.assertAlmostEqual(span_vertices[:, 0].max(), mean + sd)
+        self.assertAlmostEqual(axis.lines[0].get_xdata()[0], mean)
+        self.assertIn(f"{sd:.2f} dB", axis.get_legend().get_texts()[0].get_text())
+        self.assertEqual(
+            axis.get_legend().get_title().get_text(),
+            "Outliers outside mean +/- 1 rater SD: 1/4; Gaussian benchmark (matched SD): 1.27 (31.7%)",
+        )
+
+    def test_pooled_professional_srt_sd_uses_within_subject_degrees_of_freedom(self):
+        srts = pd.DataFrame(
+            {
+                "professional_srt_count": [3, 2, 1, 0],
+                "professional_srt_std": [1.0, math.sqrt(2.0), float("nan"), float("nan")],
+            }
+        )
+        self.assertAlmostEqual(sa.pooled_professional_srt_sd(srts), math.sqrt(4.0 / 3.0))
+        self.assertTrue(math.isnan(sa.pooled_professional_srt_sd(srts.iloc[2:])))
+        self.assertEqual(
+            sa.pooled_professional_srt_sd(pd.DataFrame(
+                {"professional_srt_count": [2], "professional_srt_std": [0.0]}
+            )),
+            0.0,
+        )
+
+    def test_srt_difference_sd_summary_boundaries_and_small_samples(self):
+        self.assertEqual(
+            sa.format_srt_difference_sd_summary(pd.Series([-1.0, 0.0, 1.0]), 1.0),
+            "Outliers outside mean +/- 1 rater SD: 0/3; Gaussian benchmark (matched SD): 0.95 (31.7%)",
+        )
+        self.assertEqual(
+            sa.format_srt_difference_sd_summary(pd.Series([1.0, 1.0]), 0.0),
+            "Outliers outside mean +/- 1 rater SD: 0/2; Gaussian benchmark not applicable (SD=0)",
+        )
+        self.assertEqual(
+            sa.format_srt_difference_sd_summary(pd.Series([1.0]), float("nan")),
+            "Outliers outside mean +/- 1 rater SD: not estimable (n=1)",
+        )
+        self.assertEqual(
+            sa.format_srt_difference_sd_summary(pd.Series([], dtype=float), 1.0),
+            "Outliers outside mean +/- 1 rater SD: not estimable (n=0)",
+        )
+        self.assertEqual(
+            sa.format_srt_difference_sd_summary(pd.Series([1.0]), 1.0),
+            "Outliers outside mean +/- 1 rater SD: 0/1; Gaussian benchmark (matched SD): 0.32 (31.7%)",
+        )
+
+    def test_print_srt_difference_sd_summaries_excludes_unpaired_subjects(self):
+        srts = pd.DataFrame(
+            {
+                "project": ["quick"] * 4,
+                "professional_srt": [0.0, 0.0, 0.0, float("nan")],
+                "professional_srt_count": [2, 2, 2, 0],
+                "professional_srt_std": [1.0, 1.0, 1.0, float("nan")],
+                "in_booth_srt": [-1.0, 0.0, 1.0, 9.0],
+                "asr_srt": [-2.0, 0.0, 1.0, 9.0],
+            }
+        )
+        with mock.patch("builtins.print") as print_mock:
+            sa.print_srt_difference_sd_summaries(srts)
+        self.assertEqual(
+            print_mock.call_args_list,
+            [
+                mock.call("Professional-rater pooled within-subject SD (quick): 1.00 dB"),
+                mock.call("In-booth vs. Professional (quick): Outliers outside mean +/- 1 rater SD: 0/3; Gaussian benchmark (matched SD): 0.95 (31.7%)"),
+                mock.call("ASR vs. Professional (quick): Outliers outside mean +/- 1 rater SD: 2/3; Gaussian benchmark (matched SD): 0.95 (31.7%)"),
+            ],
+        )
+
+    def test_srt_difference_histogram_handles_single_and_missing_pairs(self):
+        srts = pd.DataFrame(
+            {
+                "subject_id": [1, 2],
+                "subject_username": ["A1S1", "A1S2"],
+                "professional_srt": [1.0, float("nan")],
+                "professional_srt_count": [1, 0],
+                "professional_srt_std": [float("nan"), float("nan")],
+                "in_booth_srt": [2.0, 3.0],
+                "asr_srt": [float("nan"), 4.0],
+            }
+        )
+        figure, axes = sa.plt.subplots(1, 2)
+        self.addCleanup(sa.plt.close, figure)
+        sa.plot_srt_difference_histogram(srts, "in_booth_srt", "In-booth", axes[0])
+        sa.plot_srt_difference_histogram(srts, "asr_srt", "ASR", axes[1])
+        self.assertIn("Pooled rater SD not estimable", [text.get_text() for text in axes[0].texts])
+        self.assertIn("No valid data", [text.get_text() for text in axes[1].texts])
+
+    def test_srt_difference_histogram_saves_separate_project_rows(self):
+        srts = pd.DataFrame(
+            {
+                "subject_id": [1, 2],
+                "subject_username": ["A1S1", "A1S2"],
+                "project": ["quick", "win"],
+                "professional_srt": [1.0, 2.0],
+                "professional_srt_count": [2, 2],
+                "professional_srt_std": [1.0, 2.0],
+                "in_booth_srt": [2.0, 3.0],
+                "asr_srt": [3.0, 4.0],
+            }
+        )
+        path = os.path.join(self.create_tempdir().full_path, "histogram.png")
+        with mock.patch.object(sa.plt, "close") as close:
+            sa.create_srt_difference_histogram(srts, path, num_bins=2)
+        figure = close.call_args.args[0]
+        self.addCleanup(sa.plt.close, figure)
+        self.assertGreater(os.path.getsize(path), 0)
+        self.assertEqual(len(figure.axes), 4)
+        self.assertIn("quick", figure.axes[0].get_title())
+        self.assertIn("win", figure.axes[2].get_title())
+        self.assertIn("1.00 dB", figure.axes[0].get_legend().get_texts()[0].get_text())
+        self.assertIn("1.00 dB", figure.axes[1].get_legend().get_texts()[0].get_text())
+        self.assertIn("2.00 dB", figure.axes[2].get_legend().get_texts()[0].get_text())
+        self.assertIn("2.00 dB", figure.axes[3].get_legend().get_texts()[0].get_text())
 
     def test_fit_srt_recovers_logistic_midpoint(self):
         snrs = [-10, -5, 0, 5, 10, 15]
