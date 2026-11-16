@@ -55,3 +55,20 @@ th, .userinfo {
 .incorrect {
   transform: translateY(1rem);
 }
+
+/* Sessions start collapsed: click a name row to show its trials. */
+.userinfo {
+  cursor: pointer;
+}
+.userinfo .toggle {
+  font-weight: normal;
+}
+.userinfo .toggle::before {
+  content: "\25BE\00a0";
+}
+.userinfo.collapsed .toggle::before {
+  content: "\25B8\00a0";
+}
+tbody[hidden] {
+  display: none;
+}

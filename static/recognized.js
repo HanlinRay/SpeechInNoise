@@ -25,8 +25,9 @@ fetch(`api/${project}/recognized${window.location.search}`)
         "annotations": row["annotations"]
       });
     }
+    // newest session first; each starts collapsed (name and time only)
     let entries = Object.entries(users)
-      .sort(([a,], [b,]) => a - b).map(([,k]) => k);
+      .sort(([a,], [b,]) => b - a).map(([,k]) => k);
 
     const [head, body] = Array.prototype.map.call(
       document.querySelectorAll(".template"), x => {
@@ -37,7 +38,7 @@ fetch(`api/${project}/recognized${window.location.search}`)
     const parent = document.querySelector(".template").parentElement
 
     for (const user of entries) {
-      user_head = parent.appendChild(head.cloneNode(true))
+      const user_head = parent.appendChild(head.cloneNode(true))
       let plot = document.createElement("a")
       plot.href = `api/${project}/plot?user=${user["id"]}`
       plot.innerText = user["username"]
@@ -47,11 +48,30 @@ fetch(`api/${project}/recognized${window.location.search}`)
         hour12: false, year: "numeric", month: "2-digit", day: "2-digit",
         timeZoneName: "short" });
       user_head.querySelector(".time").innerText = datestr
+      const toggle = user_head.querySelector(".toggle")
+      const n = user["results"].length
+      toggle.innerText = `${n} ${n === 1 ? "trial" : "trials"}`
+      const rows = []
+      user_head.classList.add("collapsed")
+      user_head.addEventListener("click", e => {
+        if (e.target.closest("a")) return  // the name still opens the plot
+        const opening = user_head.classList.toggle("collapsed") === false
+        for (const row of rows) {
+          row.hidden = !opening
+          // audio is only fetched when a session is first opened
+          if (opening) row.querySelectorAll("audio[data-src]").forEach(a => {
+            a.src = a.dataset.src
+            a.removeAttribute("data-src")
+          })
+        }
+      })
 
       for (const trial of user["results"]) {
         el = parent.appendChild(body.cloneNode(true))
-        el.querySelector(".prompt").src = trial["prompt"]
-        el.querySelector(".response").src = trial["upload"]
+        el.hidden = true
+        rows.push(el)
+        el.querySelector(".prompt").dataset.src = trial["prompt"]
+        el.querySelector(".response").dataset.src = trial["upload"]
         el.querySelector(".transcript").innerText = trial["transcript"]
         const ans = el.querySelector(".answer")
         if (trial["annotations"] === undefined) {
