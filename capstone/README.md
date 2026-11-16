@@ -27,6 +27,12 @@ listeners on equal terms.
   native speaker confirms, through a review CSV. 13 tests.
 - Found and fixed a bug: choosing "Default" on the start page gave a 400 error on
   the Spanish and Mandarin tests (wrong language code). 5 tests.
+- The test pages show where the listener is and how far scoring has got: under
+  the test name, "List 1 · Sentence 3 of 20 · 10 dB SNR"; under All / None,
+  "5 of 7 words scored · 4 correct", green when every word is scored. The total
+  comes from a new `levels` field in the `/start` response; nothing new is
+  stored. 14 browser tests and 6 API tests (`scoring_status_test.py`,
+  `audio_levels_test.py`).
 - Not done yet: the MSPSEN and BKB-SIN lists are not in the GitHub repository (only
   AzBio Mandarin is), so they cannot be re-split until we get them from the server.
 
@@ -45,6 +51,7 @@ separate branch that becomes one pull request to the lab:
 | `scoring-keyboard-shortcuts` | `static/scoring_keys.js`, one `<script>` line per page, `scoring_keys_test.py` |
 | `mandarin-word-segmentation` | `segment_mandarin.py`, `segment_mandarin_test.py`, `jieba` in requirements |
 | `mandarin-default-language` | `api.py` (`PROJECT_LANGUAGES`), `api_language_test.py` |
+| `scoring-progress` | `static/scoring_status.js`, `levels` in `/start` (`audio.py`), a few lines of `audio.css`, one `<script>` line per page, `scoring_status_test.py`, `audio_levels_test.py` |
 | `capstone` | all of the above merged, plus this folder |
 
 ## Running it
@@ -56,7 +63,7 @@ pytest --ignore=asr_test.py --ignore=offline_asr_test.py \
 
 # Keyboard tests run in a real browser; they skip themselves without Playwright.
 pip install playwright && playwright install chromium
-pytest scoring_keys_test.py
+pytest scoring_keys_test.py scoring_status_test.py
 
 # How close is automatic splitting to the hand-split AzBio lists?
 python3 segment_mandarin.py --input metadata/azbio_mandarin_transcript.csv --evaluate
