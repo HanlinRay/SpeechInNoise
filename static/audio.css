@@ -294,3 +294,20 @@ body {
   background-color: var(--page-background-color);
   color: var(--page-text-color);
 }
+
+/* scoring_status.js: where the listener is in the list, and words scored */
+#trial-progress {
+  font-family: var(--compact);
+  font-size: var(--info-size);
+  opacity: 0.9;
+}
+#scored-count {
+  font-family: var(--compact);
+  font-size: var(--info-size);
+  margin-top: 0.5em;
+  opacity: 0.75;
+}
+#scored-count.complete {
+  color: var(--active);
+  opacity: 1;
+}
