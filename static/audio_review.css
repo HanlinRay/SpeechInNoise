@@ -153,3 +153,60 @@
     padding: clamp(2%, 2vh, 5%);
   }
   
+/* Moved here from inline style="" attributes in review.html (same values).
+   Selectors are prefixed with body so they beat the audio.css rules for the
+   same ids, as the inline styles did. */
+body #main-content-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-items: center;
+}
+body #audio-controls {
+  flex: 1;
+}
+body .playback-container #next-audio {
+  margin-top: 15px;
+}
+.next-audio-note {
+  text-align: center;
+  font-size: 0.4em;
+  color: var(--page-text-color, #666);
+  margin-top: 8px;
+  opacity: 0.8;
+}
+body #unclear-checkbox-label {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  color: var(--page-text-color);
+}
+body #unclear-checkbox {
+  margin-right: 8px;
+  cursor: pointer;
+}
+body #next-wrapper {
+  display: block;
+}
+body #footer {
+  padding: 10px;
+  min-height: 60px;
+  position: relative;
+}
+body #exit-session-btn {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+}
+
+/* Same order and font as the test pages: the words, then All / None, then
+   "Faulty Audio Recording" (it used to sit above the words, in the browser's
+   default serif font). Next Audio stays inside the form on this page: there
+   "form:invalid #next-audio" keeps it disabled until every word is scored. */
+body #unclear-checkbox-label {
+  order: 2;
+  font-family: var(--compact);
+}
+.next-audio-note {
+  font-family: var(--compact);
+}

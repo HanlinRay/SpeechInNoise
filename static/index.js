@@ -122,14 +122,51 @@ function claim_username() {
     })
 }
 
-fetch("api/lists", {method: "POST"}).then(apijson).then(data => {
-  let parent = document.getElementById("project");
+// The language of a project is the language code its lists start with
+// ("zh", "zh-1", ...). Projects are grouped by it so the tester picks the
+// language first and then sees only that language's tests.
+const LANGUAGE_NAMES = {en: "English", es: "Spanish", sp: "Spanish",
+                        zh: "Chinese"};
+function projectLanguage(lists) {
+  const codes = (lists || []).map(x => String(x).split("-")[0]);
+  return codes.length ? LANGUAGE_NAMES[codes[0]] || codes[0] : "Other";
+}
+
+function fillProjects(data, language) {
+  const parent = document.getElementById("project");
+  const keep = parent.value;
+  while (parent.firstElementChild) parent.removeChild(parent.firstElementChild);
+  // "Default" is the lab's default project; offer it only under All, so that
+  // choosing a language never starts a test in another language.
+  if (language === "all") {
+    const el = parent.appendChild(document.createElement("option"));
+    el.setAttribute("value", "null");
+    el.innerText = "Default";
+  }
   Object.keys(data).forEach(x => {
     if (x === "") return;
-    let el = parent.appendChild(document.createElement("option"));
+    if (language !== "all" && projectLanguage(data[x]) !== language) return;
+    const el = parent.appendChild(document.createElement("option"));
     el.setAttribute("value", x);
     el.innerText = x;
   })
+  if (Array.from(parent.options).some(o => o.value === keep)) parent.value = keep;
+}
+
+fetch("api/lists", {method: "POST"}).then(apijson).then(data => {
+  let parent = document.getElementById("project");
+  const languageSelect = document.getElementById("language");
+  const languages = [...new Set(Object.keys(data)
+      .filter(x => x !== "").map(x => projectLanguage(data[x])))];
+  const order = ["English", "Spanish", "Chinese"];
+  languages.sort((a, b) => ((order.indexOf(a) + 1 || 99) -
+                            (order.indexOf(b) + 1 || 99)) || a.localeCompare(b));
+  for (const name of languages) {
+    const el = languageSelect.appendChild(document.createElement("option"));
+    el.setAttribute("value", name);
+    el.innerText = name;
+  }
+  fillProjects(data, languageSelect.value);
   let secondary = document.getElementById("list");
   function updated() {
     let project = parent.value === "null" ? data[""] : parent.value
@@ -148,6 +185,10 @@ fetch("api/lists", {method: "POST"}).then(apijson).then(data => {
   }
   updated()
   parent.addEventListener("change", updated)
+  languageSelect.addEventListener("change", () => {
+    fillProjects(data, languageSelect.value);
+    updated();
+  })
 }).catch(e => {
   if (e.status === 401) {
     window.location.href = "/login?next=" + encodeURIComponent(
